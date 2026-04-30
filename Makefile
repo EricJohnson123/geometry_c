@@ -11,48 +11,42 @@ endef
 
 src = $(addprefix src/,\
   main.c \
+  ui.c \
+  elements.c \
+  tab_input.c \
+  tab_graph.c \
+  tab_stats.c \
 )
 
-CFLAGS = -std=c99
+CFLAGS  = -std=c99
 CFLAGS += $(shell $(NWLINK) eadk-cflags)
-CFLAGS += -Os -Wall
+CFLAGS += -Os -Wall -Wextra
 CFLAGS += -ggdb
-LDFLAGS = -Wl,--relocatable
+
+LDFLAGS  = -Wl,--relocatable
 LDFLAGS += -nostartfiles
 LDFLAGS += --specs=nano.specs
-# LDFLAGS += --specs=nosys.specs # Alternatively, use full-fledged newlib
 
 ifeq ($(LINK_GC),1)
-CFLAGS += -fdata-sections -ffunction-sections
+CFLAGS  += -fdata-sections -ffunction-sections
 LDFLAGS += -Wl,-e,main -Wl,-u,eadk_app_name -Wl,-u,eadk_app_icon -Wl,-u,eadk_api_level
 LDFLAGS += -Wl,--gc-sections
 endif
 
 ifeq ($(LTO),1)
-CFLAGS += -flto -fno-fat-lto-objects
-CFLAGS += -fwhole-program
-CFLAGS += -fvisibility=internal
+CFLAGS  += -flto -fno-fat-lto-objects
+CFLAGS  += -fwhole-program
+CFLAGS  += -fvisibility=internal
 LDFLAGS += -flinker-output=nolto-rel
 endif
 
 .PHONY: build
 build: $(BUILD_DIR)/app.nwa
 
-.PHONY: check
-check: $(BUILD_DIR)/app.bin
-
 .PHONY: run
-run: $(BUILD_DIR)/app.nwa src/input.txt
+run: $(BUILD_DIR)/app.nwa
 	@echo "INSTALL $<"
-	$(Q) $(NWLINK) install-nwa --external-data src/input.txt $<
-
-$(BUILD_DIR)/%.bin: $(BUILD_DIR)/%.nwa src/input.txt
-	@echo "BIN     $@"
-	$(Q) $(NWLINK) nwa-bin --external-data src/input.txt $< $@
-
-$(BUILD_DIR)/%.elf: $(BUILD_DIR)/%.nwa src/input.txt
-	@echo "ELF     $@"
-	$(Q) $(NWLINK) nwa-elf --external-data src/input.txt $< $@
+	$(Q) $(NWLINK) install-nwa $<
 
 $(BUILD_DIR)/app.nwa: $(call object_for,$(src)) $(BUILD_DIR)/icon.o
 	@echo "LD      $@"
