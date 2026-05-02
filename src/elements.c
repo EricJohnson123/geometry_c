@@ -78,8 +78,17 @@ float simple_atof(const char* s) {
   return neg ? -result : result;
 }
 
-void make_label(int idx, char* out) {
-  out[0] = 'A' + (char)(idx % 26);
+// Points: A, B, C, … (based on how many points exist before this one)
+void make_point_label(int point_idx, char* out) {
+  out[0] = 'A' + (char)(point_idx % 26);
+  out[1] = '\0';
+}
+
+// Vectors: u, v, w, … (based on how many vectors exist before this one)
+void make_vector_label(int vec_idx, char* out) {
+  // Use lowercase letters starting at 'u' cycling through u,v,w,x,y,z,a,b,...
+  static const char vec_letters[] = "uvwxyzabcdefghijklmnopqrst";
+  out[0] = vec_letters[vec_idx % 26];
   out[1] = '\0';
 }
 

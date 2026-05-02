@@ -105,6 +105,7 @@ static void render(void) {
 // ─── Switch to a tab ──────────────────────────────────────────────────────────
 static void switch_tab(Tab t) {
   current_tab = t;
+  if (t == TAB_INPUT) input_reset_scroll();
   if (t == TAB_GRAPH) graph_enter();
   if (t == TAB_STATS) stats_reset_scroll();
   mark_dirty(DIRTY_TABS | DIRTY_CONTENT | DIRTY_TOOLBAR);
