@@ -208,42 +208,173 @@ static void draw_grid_and_axes(void) {
   }
 }
 
+// ─── Vector arrow helpers ─────────────────────────────────────────────────────
+#define ARROW_LEN  9
+#define ARROW_HALF 4
+
+// Integer square root (no libm)
+static int isqrt(int v) {
+  int r = 0, bit = 1 << 14;
+  if (v < 0) v = -v;
+  while (bit > v) bit >>= 2;
+  while (bit > 0) {
+    if (v >= r + bit) { v -= r + bit; r = (r >> 1) + bit; }
+    else r >>= 1;
+    bit >>= 2;
+  }
+  return r;
+}
+
+// Draw a filled triangle (arrowhead) clipped to plot area.
+// Vertices given in screen coordinates.
+static void gtriangle(int x0, int y0, int x1, int y1, int x2, int y2,
+                      eadk_color_t c) {
+  int tx, ty, dy02, dy01, dy12, y, xa, xb;
+  // Sort vertices by y
+  if (y0 > y1) { tx=x0;x0=x1;x1=tx; ty=y0;y0=y1;y1=ty; }
+  if (y0 > y2) { tx=x0;x0=x2;x2=tx; ty=y0;y0=y2;y2=ty; }
+  if (y1 > y2) { tx=x1;x1=x2;x2=tx; ty=y1;y1=y2;y2=ty; }
+
+  dy02 = y2 - y0; dy01 = y1 - y0; dy12 = y2 - y1;
+  for (y = y0; y <= y2; y++) {
+    // Left edge: always y0→y2
+    if (dy02 == 0) xa = x0;
+    else           xa = x0 + (x2 - x0) * (y - y0) / dy02;
+    // Right edge: y0→y1 then y1→y2
+    if (y <= y1) {
+      if (dy01 == 0) xb = x0;
+      else           xb = x0 + (x1 - x0) * (y - y0) / dy01;
+    } else {
+      if (dy12 == 0) xb = x1;
+      else           xb = x1 + (x2 - x1) * (y - y1) / dy12;
+    }
+    if (xa > xb) { tx = xa; xa = xb; xb = tx; }
+    gfill(xa, y, xb - xa + 1, 1, c);
+  }
+}
+
+// Draw a vector arrow from screen (x0,y0) to (x1,y1) with arrowhead.
+// All drawing is clipped to the graph plot area [GRAPH_PLOT_Y, CONTENT_BOTTOM).
+static void gdraw_vector(int x0, int y0, int x1, int y1, eadk_color_t c) {
+  int dx, dy, len, ax, ay, px, py;
+  int tip_x, tip_y, b0x, b0y, b1x, b1y;
+
+  dx = x1 - x0;
+  dy = y1 - y0;
+  len = isqrt(dx * dx + dy * dy);
+  if (len == 0) return;
+
+  ax = dx * ARROW_LEN / len;
+  ay = dy * ARROW_LEN / len;
+  px = -dy * ARROW_HALF / len;
+  py =  dx * ARROW_HALF / len;
+
+  tip_x = x1;
+  tip_y = y1;
+  b0x = tip_x - ax + px;
+  b0y = tip_y - ay + py;
+  b1x = tip_x - ax - px;
+  b1y = tip_y - ay - py;
+
+  // Shaft: Bresenham line clipped to GRAPH_PLOT_Y..CONTENT_BOTTOM, 2px thick.
+  {
+    int lx0 = x0, ly0 = y0, lx1 = tip_x - ax, ly1 = tip_y - ay;
+    int adx = lx1 - lx0; if (adx < 0) adx = -adx;
+    int ady = ly1 - ly0; if (ady < 0) ady = -ady;
+    int sx = (lx1 >= lx0) ? 1 : -1;
+    int sy = (ly1 >= ly0) ? 1 : -1;
+    int err = adx - ady;
+    int cx = lx0, cy = ly0;
+    while (1) {
+      // Draw a 2x2 block for thickness; gfill clips to plot area
+      gfill(cx, cy, 2, 2, c);
+      if (cx == lx1 && cy == ly1) break;
+      {
+        int e2 = 2 * err;
+        if (e2 > -ady) { err -= ady; cx += sx; }
+        if (e2 <  adx) { err += adx; cy += sy; }
+      }
+    }
+  }
+
+  gtriangle(tip_x, tip_y, b0x, b0y, b1x, b1y, c);
+}
+
 static void draw_elements(void) {
-  int i, sx, sy;
+  int i, sx, sy, tx, ty, ox, oy;
   eadk_color_t ac;
+  char lbl_str[8];
+  Element* e;
+
   for (i = 0; i < elem_count; i++) {
-    Element* e = &elements[i];
+    e = &elements[i];
     if (!e->active) continue;
-    sx = world_to_screen_x(e->x);
-    sy = world_to_screen_y(e->y);
     ac = accent_colors[i % NUM_ACCENT_COLORS];
-    gdot(sx, sy, 3, ac);
-    gring(sx, sy, 5, ac);
-    /* Label: only draw if within plot area */
-    if (sy - SMALL_FONT_H >= GRAPH_PLOT_Y && sy - SMALL_FONT_H < CONTENT_BOTTOM
-        && sx + 7 >= 0 && sx + 7 < SCREEN_W)
-      draw_str(e->label, sx + 7, sy - SMALL_FONT_H, false, ac, COLOR_WHITE);
+
+    if (e->type == ELEM_POINT) {
+      sx = world_to_screen_x(e->x);
+      sy = world_to_screen_y(e->y);
+      gdot(sx, sy, 3, ac);
+      gring(sx, sy, 5, ac);
+      if (sy - SMALL_FONT_H >= GRAPH_PLOT_Y && sy - SMALL_FONT_H < CONTENT_BOTTOM
+          && sx + 7 >= 0 && sx + 7 < SCREEN_W)
+        draw_str(e->label, sx + 7, sy - SMALL_FONT_H, false, ac, COLOR_WHITE);
+
+    } else if (e->type == ELEM_VECTOR) {
+      ox = world_to_screen_x(e->ox);
+      oy = world_to_screen_y(e->oy);
+      tx = world_to_screen_x(e->ox + e->x);
+      ty = world_to_screen_y(e->oy + e->y);
+
+      gdraw_vector(ox, oy, tx, ty, ac);
+
+      // Label offset further from tip than a point label, so both are readable
+      // if a point happens to sit exactly at the vector tip.
+      snprintf(lbl_str, sizeof(lbl_str), "->%s", e->label);
+      sx = tx + 14;
+      sy = ty - SMALL_FONT_H - 2;
+      if (sx + (int)(strlen(lbl_str) * SMALL_FONT_W) > SCREEN_W)
+        sx = tx - (int)(strlen(lbl_str) * SMALL_FONT_W) - 4;
+      if (sy < GRAPH_PLOT_Y) sy = ty + 4;
+      if (sy + SMALL_FONT_H > CONTENT_BOTTOM) sy = CONTENT_BOTTOM - SMALL_FONT_H - 1;
+      if (sy >= GRAPH_PLOT_Y && sy + SMALL_FONT_H <= CONTENT_BOTTOM
+          && sx >= 0 && sx < SCREEN_W)
+        draw_str(lbl_str, sx, sy, false, ac, COLOR_WHITE);
+    }
   }
 }
 
 // ─── Auto-fit ─────────────────────────────────────────────────────────────────
 static void auto_fit(void) {
-  int count, i;
+  int count, i, ncands, p;
   float xmin, xmax, ymin, ymax, xpad, ypad;
+  float cands[2][2];
+  Element* efit;
   count = 0;
   xmin = xmax = ymin = ymax = 0.0f;
   for (i = 0; i < elem_count; i++) {
-    if (!elements[i].active) continue;
-    if (count == 0) {
-      xmin = xmax = elements[i].x;
-      ymin = ymax = elements[i].y;
+    efit = &elements[i];
+    if (!efit->active) continue;
+    if (efit->type == ELEM_POINT) {
+      cands[0][0] = efit->x; cands[0][1] = efit->y; ncands = 1;
     } else {
-      if (elements[i].x < xmin) xmin = elements[i].x;
-      if (elements[i].x > xmax) xmax = elements[i].x;
-      if (elements[i].y < ymin) ymin = elements[i].y;
-      if (elements[i].y > ymax) ymax = elements[i].y;
+      // Vector: include both origin and tip
+      cands[0][0] = efit->ox;          cands[0][1] = efit->oy;
+      cands[1][0] = efit->ox + efit->x; cands[1][1] = efit->oy + efit->y;
+      ncands = 2;
     }
-    count++;
+    for (p = 0; p < ncands; p++) {
+      if (count == 0) {
+        xmin = xmax = cands[p][0];
+        ymin = ymax = cands[p][1];
+      } else {
+        if (cands[p][0] < xmin) xmin = cands[p][0];
+        if (cands[p][0] > xmax) xmax = cands[p][0];
+        if (cands[p][1] < ymin) ymin = cands[p][1];
+        if (cands[p][1] > ymax) ymax = cands[p][1];
+      }
+      count++;
+    }
   }
   if (count == 0) {
     graph_x_min=-10.0f; graph_x_max=10.0f;

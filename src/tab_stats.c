@@ -275,7 +275,7 @@ static void draw_scrollbar(void) {
 
 // ─── Draw ─────────────────────────────────────────────────────────────────────
 void draw_stats_tab(void) {
-  int ai[MAX_ELEMENTS], acount, i;
+  int ai[MAX_ELEMENTS], vi[MAX_ELEMENTS], acount, vcount, i, j;
   char buf[64], v1[16], v2[16], lbl[16];
   Element *a, *b, *c;
   float d, mx, my, slope, intercept, abx, aby;
@@ -289,18 +289,31 @@ void draw_stats_tab(void) {
   stat_total_h = 0;
   stat_y = STAT_BASE_Y - stat_scroll;
 
-  // Collect active points
+  // Collect active points and active vectors separately
   acount = 0;
-  for (i = 0; i < elem_count; i++)
-    if (elements[i].active) ai[acount++] = i;
+  vcount = 0;
+  for (i = 0; i < elem_count; i++) {
+    if (!elements[i].active) continue;
+    if (elements[i].type == ELEM_POINT)  ai[acount++] = i;
+    if (elements[i].type == ELEM_VECTOR) vi[vcount++] = i;
+  }
 
-  if (acount == 0) {
+  if (acount == 0 && vcount == 0) {
     draw_str_clipped("No active elements.", 10, stat_y,
                      false, COLOR_DARK_GRAY, COLOR_WHITE);
     stat_y += SMALL_FONT_H + 4;
     draw_str_clipped("Press OK on an element in Input tab.", 10, stat_y,
                      false, COLOR_DARK_GRAY, COLOR_WHITE);
     draw_scrollbar(); return;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // POINTS SECTION (only shown if there are active points)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  if (acount == 0) {
+    // No points — skip to vectors below
+    goto vectors_section;
   }
 
   // ── 1 point ──────────────────────────────────────────────────────────────
@@ -310,10 +323,12 @@ void draw_stats_tab(void) {
     stat_header(buf);
     fmtnum(a->x, v1); stat_line("x", v1);
     fmtnum(a->y, v2); stat_line("y", v2);
-    stat_sep();
-    draw_str_clipped("Select 2+ points for more stats.", 10, stat_y,
-                     false, COLOR_DARK_GRAY, COLOR_WHITE);
-    draw_scrollbar(); return;
+    if (vcount == 0) {
+      stat_sep();
+      draw_str_clipped("Select 2+ points for more stats.", 10, stat_y,
+                       false, COLOR_DARK_GRAY, COLOR_WHITE);
+    }
+    goto vectors_section;
   }
 
   // ── 2 points ─────────────────────────────────────────────────────────────
@@ -368,7 +383,7 @@ void draw_stats_tab(void) {
     snprintf(lbl, sizeof(lbl), "%s%s", b->label, a->label);
     stat_line(lbl, buf);
 
-    draw_scrollbar(); return;
+    draw_scrollbar(); goto vectors_section;
   }
 
   // ── 3 points ─────────────────────────────────────────────────────────────
@@ -474,7 +489,7 @@ void draw_stats_tab(void) {
       if (eq_ab_bc || eq_bc_ca || eq_ab_ca) stat_line("Has equal sides?", "Yes");
     }
 
-    draw_scrollbar(); return;
+    draw_scrollbar(); goto vectors_section;
   }
 
   // ── 4+ points ────────────────────────────────────────────────────────────
@@ -495,6 +510,108 @@ void draw_stats_tab(void) {
   stat_sep();
   draw_str_clipped("Select 2 or 3 pts for full stats.", 10, stat_y,
                    false, COLOR_DARK_GRAY, COLOR_WHITE);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // VECTORS SECTION (only shown if there are active vectors)
+  // ══════════════════════════════════════════════════════════════════════════
+vectors_section:
+  if (vcount == 0) {
+    draw_scrollbar();
+    return;
+  }
+
+  // Separator between sections if we had points
+  if (acount > 0) stat_sep();
+
+  if (vcount == 1) {
+    Element* va = &elements[vi[0]];
+    float mag;
+    float vdx = va->x, vdy = va->y;
+    snprintf(buf, sizeof(buf), "Vector ->%s", va->label);
+    stat_header(buf);
+    fmtnum(vdx, v1); fmtnum(vdy, v2);
+    snprintf(buf, sizeof(buf), "(%s, %s)", v1, v2);
+    stat_line("Components", buf);
+    // Magnitude: sqrt(dx^2 + dy^2)
+    mag = fsqrt(vdx * vdx + vdy * vdy);
+    fmtnum(mag, v1);
+    stat_line("Length |v|", v1);
+    if (va->has_origin) {
+      fmtnum(va->ox, v1); fmtnum(va->oy, v2);
+      snprintf(buf, sizeof(buf), "(%s, %s)", v1, v2);
+      stat_line("Origin", buf);
+    }
+
+  } else if (vcount == 2) {
+    Element* va = &elements[vi[0]];
+    Element* vb = &elements[vi[1]];
+    float mag_a, mag_b, det;
+    float vdx_a = va->x, vdy_a = va->y;
+    float vdx_b = vb->x, vdy_b = vb->y;
+
+    snprintf(buf, sizeof(buf), "Vector ->%s", va->label);
+    stat_header(buf);
+    fmtnum(vdx_a, v1); fmtnum(vdy_a, v2);
+    snprintf(buf, sizeof(buf), "(%s, %s)", v1, v2);
+    stat_line("Components", buf);
+    mag_a = fsqrt(vdx_a * vdx_a + vdy_a * vdy_a);
+    fmtnum(mag_a, v1);
+    stat_line("Length |v|", v1);
+    if (va->has_origin) {
+      fmtnum(va->ox, v1); fmtnum(va->oy, v2);
+      snprintf(buf, sizeof(buf), "(%s, %s)", v1, v2);
+      stat_line("Origin", buf);
+    }
+
+    stat_sep();
+
+    snprintf(buf, sizeof(buf), "Vector ->%s", vb->label);
+    stat_header(buf);
+    fmtnum(vdx_b, v1); fmtnum(vdy_b, v2);
+    snprintf(buf, sizeof(buf), "(%s, %s)", v1, v2);
+    stat_line("Components", buf);
+    mag_b = fsqrt(vdx_b * vdx_b + vdy_b * vdy_b);
+    fmtnum(mag_b, v1);
+    stat_line("Length |v|", v1);
+    if (vb->has_origin) {
+      fmtnum(vb->ox, v1); fmtnum(vb->oy, v2);
+      snprintf(buf, sizeof(buf), "(%s, %s)", v1, v2);
+      stat_line("Origin", buf);
+    }
+
+    stat_sep();
+    stat_header("Relations");
+    // Determinant: dx_a*dy_b - dy_a*dx_b
+    det = vdx_a * vdy_b - vdy_a * vdx_b;
+    fmtnum(det, v1);
+    stat_line("Det(u,v)", v1);
+    if (det > -0.001f && det < 0.001f)
+      stat_line("Parallel?", "Yes (det=0)");
+
+  } else {
+    // 3+ vectors: just list each with components and length
+    int j;
+    Element* vj;
+    float vmag;
+    snprintf(buf, sizeof(buf), "%d active vectors", vcount);
+    stat_header(buf);
+    for (j = 0; j < vcount; j++) {
+      vj = &elements[vi[j]];
+      vmag = fsqrt(vj->x * vj->x + vj->y * vj->y);
+      fmtnum(vj->x, v1); fmtnum(vj->y, v2);
+      snprintf(lbl, sizeof(lbl), "->%s", vj->label);
+      snprintf(buf, sizeof(buf), "(%s,%s)", v1, v2);
+      stat_line(lbl, buf);
+      fmtnum(vmag, v1);
+      snprintf(lbl, sizeof(lbl), "|->%s|", vj->label);
+      stat_line(lbl, v1);
+      if (j < vcount - 1) stat_sep();
+    }
+    stat_sep();
+    draw_str_clipped("Select 2 vectors for det.", 10, stat_y,
+                     false, COLOR_DARK_GRAY, COLOR_WHITE);
+  }
+
   draw_scrollbar();
 }
 

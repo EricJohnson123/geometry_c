@@ -3,12 +3,12 @@
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
 const eadk_color_t accent_colors[6] = {
-  0xF800, // red
-  0x001F, // blue
-  0x07E0, // green
-  0xFDA7, // orange
-  0x780F, // purple
-  0x07FF, // cyan
+  0xF800, // red        (keep)
+  0x001F, // blue       (keep)
+  0x3666, // slate gray-green  (replaces aggressive green)
+  0x8C51, // dusty rose / mauve (replaces aggressive orange)
+  0x602F, // muted indigo      (replaces aggressive purple)
+  0x4CD3, // steel blue-gray   (replaces aggressive cyan)
 };
 
 uint8_t   dirty    = DIRTY_ALL;
