@@ -10,7 +10,7 @@
 #define SCREEN_H          240
 #define HEADER_H           18
 #define TAB_H              22
-#define TOOLBAR_H          28
+#define TOOLBAR_H          0
 #define CONTENT_Y          (HEADER_H + TAB_H)
 #define CONTENT_H          (SCREEN_H - HEADER_H - TAB_H - TOOLBAR_H)
 #define CONTENT_BOTTOM     (CONTENT_Y + CONTENT_H)
