@@ -85,15 +85,6 @@ static void render(void) {
     }
   }
 
-  if (is_dirty(DIRTY_TOOLBAR)) {
-    switch (current_tab) {
-      case TAB_INPUT: draw_toolbar_input(); break;
-      case TAB_GRAPH: draw_toolbar_graph(graph_cursor_x, graph_cursor_y,
-                                         graph_cursor_valid); break;
-      case TAB_STATS: draw_toolbar_stats(); break;
-    }
-  }
-
   if (is_dirty(DIRTY_OVERLAY) && current_tab == TAB_INPUT)
     draw_input_overlay();
 

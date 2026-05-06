@@ -6,20 +6,23 @@ Element elements[MAX_ELEMENTS];
 int     elem_count = 0;
 
 void ftoa(float v, char* buf, int decimals) {
+  int ipart, ti, i;
+  float fpart;
+  char tmp[12];
   if (v < 0.0f) { *buf++ = '-'; v = -v; }
-  int ipart = (int)v;
-  float fpart = v - (float)ipart;
+  ipart = (int)v;
+  fpart = v - (float)ipart;
   if (ipart == 0) {
     *buf++ = '0';
   } else {
-    char tmp[12]; int ti = 0;
-    int ip = ipart;
-    while (ip > 0) { tmp[ti++] = '0' + (ip % 10); ip /= 10; }
-    for (int i = ti - 1; i >= 0; i--) *buf++ = tmp[i];
+    ti = 0;
+    i  = ipart;
+    while (i > 0) { tmp[ti++] = '0' + (i % 10); i /= 10; }
+    for (i = ti - 1; i >= 0; i--) *buf++ = tmp[i];
   }
   if (decimals > 0) {
     *buf++ = '.';
-    for (int i = 0; i < decimals; i++) {
+    for (i = 0; i < decimals; i++) {
       fpart *= 10.0f;
       int d = (int)fpart;
       *buf++ = '0' + d;
@@ -78,17 +81,29 @@ float simple_atof(const char* s) {
   return neg ? -result : result;
 }
 
-// Points: A, B, C, … (based on how many points exist before this one)
+// Generic label: A, B, C, …
+void make_label(int idx, char* out) {
+  out[0] = 'A' + (char)(idx % 26);
+  out[1] = '\0';
+}
+
+// Points: A, B, C, …
 void make_point_label(int point_idx, char* out) {
   out[0] = 'A' + (char)(point_idx % 26);
   out[1] = '\0';
 }
 
-// Vectors: u, v, w, … (based on how many vectors exist before this one)
+// Vectors: u, v, w, x, y, z, a, b, …
 void make_vector_label(int vec_idx, char* out) {
-  // Use lowercase letters starting at 'u' cycling through u,v,w,x,y,z,a,b,...
   static const char vec_letters[] = "uvwxyzabcdefghijklmnopqrst";
   out[0] = vec_letters[vec_idx % 26];
+  out[1] = '\0';
+}
+
+// Lines: d, e, f, g, … (avoids a/b/c used by points, u/v/w by vectors)
+void make_line_label(int line_idx, char* out) {
+  static const char line_letters[] = "defghijklmnopqrstuvwxyzabc";
+  out[0] = line_letters[line_idx % 26];
   out[1] = '\0';
 }
 
@@ -100,4 +115,12 @@ void buf_append(char* buf, char c, int max_len) {
 void buf_backspace(char* buf) {
   int l = (int)strlen(buf);
   if (l > 0) buf[l - 1] = '\0';
+}
+
+int count_type(ElementType type) {
+  int i, count;
+  count = 0;
+  for (i = 0; i < elem_count; i++)
+    if (elements[i].type == type) count++;
+  return count;
 }
