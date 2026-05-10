@@ -44,6 +44,9 @@ static int   line_cart_field = 0;
 static int   dot_menu_sel = 0;
 static int   dot_menu_row = -1;
 
+// Rename
+static char  rename_char = 'A';
+
 // List scroll
 static int   list_scroll = 0;
 
@@ -142,6 +145,55 @@ static void commit_line_cart(void) {
     elem_count++;
     selected_row = elem_count - 1;
   }
+  input_state = STATE_LIST;
+  mark_dirty(DIRTY_CONTENT);
+}
+
+// ─── Edit commit helpers (write-back to existing element) ────────────────────
+static void commit_edit_point(void) {
+  Element *e = &elements[dot_menu_row];
+  e->x = simple_atof(input_x_buf);
+  e->y = simple_atof(input_y_buf);
+  input_state = STATE_LIST;
+  mark_dirty(DIRTY_CONTENT);
+}
+
+static void commit_edit_vector(void) {
+  Element *e = &elements[dot_menu_row];
+  e->x          = simple_atof(vec_dx_buf);
+  e->y          = simple_atof(vec_dy_buf);
+  e->has_origin = vec_has_origin;
+  e->ox         = vec_has_origin ? simple_atof(vec_ox_buf) : 0.0f;
+  e->oy         = vec_has_origin ? simple_atof(vec_oy_buf) : 0.0f;
+  input_state = STATE_LIST;
+  mark_dirty(DIRTY_CONTENT);
+}
+
+static void commit_edit_line_si(void) {
+  float m, b;
+  Element *e = &elements[dot_menu_row];
+  m = simple_atof(line_m_buf);
+  b = simple_atof(line_b_buf);
+  e->si_form = true;
+  e->si_m    = m;
+  e->si_b    = b;
+  e->x  = m;
+  e->y  = -1.0f;
+  e->ox = b;
+  e->oy = 0.0f;
+  input_state = STATE_LIST;
+  mark_dirty(DIRTY_CONTENT);
+}
+
+static void commit_edit_line_cart(void) {
+  Element *e = &elements[dot_menu_row];
+  e->si_form = false;
+  e->si_m    = 0.0f;
+  e->si_b    = 0.0f;
+  e->x  = simple_atof(line_a_buf);
+  e->y  = simple_atof(line_b2_buf);
+  e->ox = simple_atof(line_c_buf);
+  e->oy = 0.0f;
   input_state = STATE_LIST;
   mark_dirty(DIRTY_CONTENT);
 }
@@ -539,12 +591,16 @@ static void draw_line_cart_entry(void) {
 
 // ─── Draw: dot menu ───────────────────────────────────────────────────────────
 static void draw_dot_menu(void) {
-  bool sel;
   eadk_color_t bg;
-  int iy;
+  int iy, i;
+  bool sel;
+  static const char* dot_items[] = { "Delete", "Rename", "Edit" };
+  int num_items = 3;
   int mx = SCREEN_W - 108;
   int my = CONTENT_Y + dot_menu_row * ROW_H + 4;
-  int mw = 100, item_h = 28, mh = 20 + item_h;
+  int mw = 100;
+  int item_h = 28;
+  int mh = 20 + num_items * item_h;
 
   fill_rect_clipped(mx, my, mw, mh, COLOR_WHITE);
   draw_rect_border(mx, my, mw, mh, COLOR_DARK_GRAY);
@@ -552,12 +608,192 @@ static void draw_dot_menu(void) {
   draw_str_clipped("Menu", mx + 6, my + 2, false, COLOR_WHITE, COLOR_TAB_INACTIVE);
   draw_hline_clipped(mx, my + 17, mw, COLOR_DARK_GRAY);
 
-  iy  = my + 18;
-  sel = (dot_menu_sel == 0);
-  bg  = sel ? COLOR_ROW_SELECTED : COLOR_WHITE;
-  fill_rect_clipped(mx + 1, iy, mw - 2, item_h, bg);
-  if (sel) draw_str_clipped(">", mx + 4, iy + 7, false, COLOR_ORANGE, bg);
-  draw_str_clipped("Delete", mx + 16, iy + 7, false, COLOR_BLACK, bg);
+  for (i = 0; i < num_items; i++) {
+    iy  = my + 18 + i * item_h;
+    sel = (dot_menu_sel == i);
+    bg  = sel ? COLOR_ROW_SELECTED : COLOR_WHITE;
+    fill_rect_clipped(mx + 1, iy, mw - 2, item_h, bg);
+    if (sel) draw_str_clipped(">", mx + 4, iy + 7, false, COLOR_ORANGE, bg);
+    draw_str_clipped(dot_items[i], mx + 16, iy + 7, false, COLOR_BLACK, bg);
+    if (i < num_items - 1)
+      draw_hline_clipped(mx, iy + item_h - 1, mw, COLOR_LIGHT_GRAY);
+  }
+}
+
+// ─── Draw: rename form ────────────────────────────────────────────────────────
+static void draw_rename(void) {
+  char lbuf[3];
+  int i;
+  int fx = 40, fy = CONTENT_Y + 20, fw = 240, fh = 100;
+
+  lbuf[0] = rename_char;
+  lbuf[1] = '\0';
+
+  fill_rect_clipped(fx, fy, fw, fh, COLOR_WHITE);
+  draw_rect_border(fx, fy, fw, fh, COLOR_DARK_GRAY);
+  fill_rect_clipped(fx + 1, fy + 1, fw - 2, 16, COLOR_TAB_INACTIVE);
+  draw_str_clipped("Rename", fx + 6, fy + 2, false, COLOR_WHITE, COLOR_TAB_INACTIVE);
+  draw_hline_clipped(fx, fy + 17, fw, COLOR_DARK_GRAY);
+
+  if (dot_menu_row >= 0 && dot_menu_row < elem_count) {
+    char cur_lbl[20];
+    snprintf(cur_lbl, sizeof(cur_lbl), "Current: %s", elements[dot_menu_row].label);
+    draw_str_clipped(cur_lbl, fx + 10, fy + 24, false, COLOR_DARK_GRAY, COLOR_WHITE);
+  }
+
+  // Show A-Z bar with current highlighted
+  for (i = 0; i < 26; i++) {
+    char ch[2];
+    int cx = fx + 8 + i * 8;
+    int cy = fy + 44;
+    bool is_cur = ((char)('A' + i) == rename_char);
+    ch[0] = 'A' + i;
+    ch[1] = '\0';
+    if (is_cur) {
+      fill_rect_clipped(cx - 1, cy - 1, 10, SMALL_FONT_H + 2, COLOR_ORANGE);
+      draw_str_clipped(ch, cx, cy, false, COLOR_WHITE, COLOR_ORANGE);
+    } else {
+      draw_str_clipped(ch, cx, cy, false, COLOR_DARK_GRAY, COLOR_WHITE);
+    }
+  }
+
+  // Check duplicate warning
+  {
+    int j;
+    bool dup = false;
+    for (j = 0; j < elem_count; j++) {
+      if (j == dot_menu_row) continue;
+      if (elements[j].label[0] == rename_char) { dup = true; break; }
+    }
+    if (dup)
+      draw_str_clipped("Name taken!", fx + 10, fy + 66, false, COLOR_ORANGE, COLOR_WHITE);
+  }
+
+  draw_str_clipped("Up/Dn:cycle  EXE:confirm", fx + 6, fy + 82,
+                   false, COLOR_DARK_GRAY, COLOR_WHITE);
+}
+
+// ─── Draw: edit point form ────────────────────────────────────────────────────
+static void draw_edit_point(void) {
+  bool x_sel, y_sel;
+  eadk_color_t x_bg, x_border, y_bg, y_border;
+  char xbuf[18], ybuf[18];
+  int fx = 20, fy = CONTENT_Y + 10, fw = 280, fh = 100;
+
+  fill_rect_clipped(fx, fy, fw, fh, COLOR_WHITE);
+  draw_rect_border(fx, fy, fw, fh, COLOR_DARK_GRAY);
+  fill_rect_clipped(fx + 1, fy + 1, fw - 2, 16, COLOR_TAB_INACTIVE);
+  draw_str_clipped("Edit Point", fx + 6, fy + 2, false, COLOR_WHITE, COLOR_TAB_INACTIVE);
+  draw_hline_clipped(fx, fy + 17, fw, COLOR_DARK_GRAY);
+
+  x_sel    = (input_field == 0);
+  x_bg     = x_sel ? COLOR_ROW_SELECTED : COLOR_WHITE;
+  x_border = x_sel ? COLOR_ORANGE : COLOR_DARK_GRAY;
+  fill_rect_clipped(fx + 8, fy + 22, fw - 16, 24, x_bg);
+  draw_rect_border(fx + 8, fy + 22, fw - 16, 24, x_border);
+  draw_str_clipped("x =", fx + 12, fy + 27, false, COLOR_DARK_GRAY, x_bg);
+  snprintf(xbuf, sizeof(xbuf), "%s%s", input_x_buf, x_sel ? "|" : "");
+  draw_str_clipped(xbuf, fx + 48, fy + 27, false, COLOR_BLACK, x_bg);
+
+  y_sel    = (input_field == 1);
+  y_bg     = y_sel ? COLOR_ROW_SELECTED : COLOR_WHITE;
+  y_border = y_sel ? COLOR_ORANGE : COLOR_DARK_GRAY;
+  fill_rect_clipped(fx + 8, fy + 52, fw - 16, 24, y_bg);
+  draw_rect_border(fx + 8, fy + 52, fw - 16, 24, y_border);
+  draw_str_clipped("y =", fx + 12, fy + 57, false, COLOR_DARK_GRAY, y_bg);
+  snprintf(ybuf, sizeof(ybuf), "%s%s", input_y_buf, y_sel ? "|" : "");
+  draw_str_clipped(ybuf, fx + 48, fy + 57, false, COLOR_BLACK, y_bg);
+
+  draw_str_clipped("EXE: next  Back: cancel", fx + 8, fy + 82,
+                   false, COLOR_DARK_GRAY, COLOR_WHITE);
+}
+
+// ─── Draw: edit vector form (reuses draw_vector_entry with Edit title) ────────
+static void draw_edit_vector(void) {
+  bool sel;
+  eadk_color_t bg, border;
+  char buf[18];
+  int fx = VEC_FX;
+  int fy = CONTENT_Y + 8;
+  int fw = VEC_FW;
+  int fh = vec_has_origin ? VEC_FH_EXPANDED : VEC_FH_COLLAPSED;
+
+  fill_rect_clipped(fx, fy, fw, VEC_FH_MAX, COLOR_WHITE);
+  fill_rect_clipped(fx, fy, fw, fh, COLOR_WHITE);
+  draw_rect_border(fx, fy, fw, fh, COLOR_DARK_GRAY);
+  fill_rect_clipped(fx + 1, fy + 1, fw - 2, 16, COLOR_TAB_INACTIVE);
+  draw_str_clipped("Edit Vector", fx + 6, fy + 2, false, COLOR_WHITE, COLOR_TAB_INACTIVE);
+  draw_hline_clipped(fx, fy + 17, fw, COLOR_DARK_GRAY);
+
+  sel    = (vec_field == 0);
+  bg     = sel ? COLOR_ROW_SELECTED : COLOR_WHITE;
+  border = sel ? COLOR_ORANGE : COLOR_DARK_GRAY;
+  fill_rect_clipped(fx + 8, fy + 22, fw - 16, 24, bg);
+  draw_rect_border(fx + 8, fy + 22, fw - 16, 24, border);
+  draw_str_clipped("dx =", fx + 12, fy + 27, false, COLOR_DARK_GRAY, bg);
+  snprintf(buf, sizeof(buf), "%s%s", vec_dx_buf, sel ? "|" : "");
+  draw_str_clipped(buf, fx + 58, fy + 27, false, COLOR_BLACK, bg);
+
+  sel    = (vec_field == 1);
+  bg     = sel ? COLOR_ROW_SELECTED : COLOR_WHITE;
+  border = sel ? COLOR_ORANGE : COLOR_DARK_GRAY;
+  fill_rect_clipped(fx + 8, fy + 50, fw - 16, 24, bg);
+  draw_rect_border(fx + 8, fy + 50, fw - 16, 24, border);
+  draw_str_clipped("dy =", fx + 12, fy + 55, false, COLOR_DARK_GRAY, bg);
+  snprintf(buf, sizeof(buf), "%s%s", vec_dy_buf, sel ? "|" : "");
+  draw_str_clipped(buf, fx + 58, fy + 55, false, COLOR_BLACK, bg);
+
+  if (!vec_has_origin) {
+    int by = fy + 82;
+    int bw = (fw - 28) / 2;
+
+    sel    = (vec_field == 2);
+    bg     = sel ? COLOR_ROW_SELECTED : COLOR_ADD_ROW_BG;
+    border = sel ? COLOR_ORANGE : COLOR_DARK_GRAY;
+    fill_rect_clipped(fx + 8, by, bw, 22, bg);
+    draw_rect_border(fx + 8, by, bw, 22, border);
+    draw_str_clipped("save", fx + 8 + (bw - 4*SMALL_FONT_W)/2, by + 4,
+                     false, COLOR_BLACK, bg);
+
+    sel    = (vec_field == 3);
+    bg     = sel ? COLOR_ROW_SELECTED : COLOR_ADD_ROW_BG;
+    border = sel ? COLOR_ORANGE : COLOR_DARK_GRAY;
+    fill_rect_clipped(fx + 8 + bw + 8, by, bw, 22, bg);
+    draw_rect_border(fx + 8 + bw + 8, by, bw, 22, border);
+    draw_str_clipped("origin", fx + 8 + bw + 8 + (bw - 6*SMALL_FONT_W)/2,
+                     by + 4, false, COLOR_BLACK, bg);
+  } else {
+    sel    = (vec_field == 2);
+    bg     = sel ? COLOR_ROW_SELECTED : COLOR_WHITE;
+    border = sel ? COLOR_ORANGE : COLOR_DARK_GRAY;
+    fill_rect_clipped(fx + 8, fy + 78, fw - 16, 24, bg);
+    draw_rect_border(fx + 8, fy + 78, fw - 16, 24, border);
+    draw_str_clipped("ox =", fx + 12, fy + 83, false, COLOR_DARK_GRAY, bg);
+    snprintf(buf, sizeof(buf), "%s%s", vec_ox_buf, sel ? "|" : "");
+    draw_str_clipped(buf, fx + 58, fy + 83, false, COLOR_BLACK, bg);
+
+    sel    = (vec_field == 3);
+    bg     = sel ? COLOR_ROW_SELECTED : COLOR_WHITE;
+    border = sel ? COLOR_ORANGE : COLOR_DARK_GRAY;
+    fill_rect_clipped(fx + 8, fy + 106, fw - 16, 24, bg);
+    draw_rect_border(fx + 8, fy + 106, fw - 16, 24, border);
+    draw_str_clipped("oy =", fx + 12, fy + 111, false, COLOR_DARK_GRAY, bg);
+    snprintf(buf, sizeof(buf), "%s%s", vec_oy_buf, sel ? "|" : "");
+    draw_str_clipped(buf, fx + 58, fy + 111, false, COLOR_BLACK, bg);
+
+    {
+      int by = fy + 134;
+      int bw = 120;
+      int bx = fx + (fw - bw) / 2;
+      sel    = (vec_field == 4);
+      bg     = sel ? COLOR_ROW_SELECTED : COLOR_ADD_ROW_BG;
+      border = sel ? COLOR_ORANGE : COLOR_DARK_GRAY;
+      fill_rect_clipped(bx, by, bw, 22, bg);
+      draw_rect_border(bx, by, bw, 22, border);
+      draw_str_clipped("save", bx + (bw - 4*SMALL_FONT_W)/2, by + 4,
+                       false, COLOR_BLACK, bg);
+    }
+  }
 }
 
 // ─── Combined overlay draw ────────────────────────────────────────────────────
@@ -572,10 +808,18 @@ void draw_input_overlay(void) {
       case LINE_SUB_CARTESIAN:       draw_line_cart_entry();  break;
     }
   }
-  if (input_state == STATE_DOT_MENU) draw_dot_menu();
+  if (input_state == STATE_DOT_MENU)     draw_dot_menu();
+  if (input_state == STATE_RENAME)       draw_rename();
+  if (input_state == STATE_EDIT_POINT)   draw_edit_point();
+  if (input_state == STATE_EDIT_VECTOR)  draw_edit_vector();
+  if (input_state == STATE_EDIT_LINE) {
+    switch (line_substate) {
+      case LINE_SUB_CHOOSE:          draw_line_type_picker(); break;
+      case LINE_SUB_SLOPE_INTERCEPT: draw_line_si_entry();    break;
+      case LINE_SUB_CARTESIAN:       draw_line_cart_entry();  break;
+    }
+  }
 }
-
-// ─── Event handlers ───────────────────────────────────────────────────────────
 static void handle_list(eadk_event_t ev) {
   int total   = elem_count + 1;
   int total_h = total * ROW_H;
@@ -894,10 +1138,11 @@ static void handle_dot_menu(eadk_event_t ev) {
     case eadk_event_up:
       if (dot_menu_sel > 0) { dot_menu_sel--; mark_dirty(DIRTY_OVERLAY); } break;
     case eadk_event_down:
-      if (dot_menu_sel < 0) { dot_menu_sel++; mark_dirty(DIRTY_OVERLAY); } break;
+      if (dot_menu_sel < 2) { dot_menu_sel++; mark_dirty(DIRTY_OVERLAY); } break;
     case eadk_event_ok:
     case eadk_event_exe:
       if (dot_menu_sel == 0) {
+        /* Delete */
         for (i = dot_menu_row; i < elem_count - 1; i++)
           elements[i] = elements[i + 1];
         elem_count--;
@@ -905,9 +1150,255 @@ static void handle_dot_menu(eadk_event_t ev) {
           selected_row = elem_count > 0 ? elem_count - 1 : 0;
         input_state = STATE_LIST;
         mark_dirty(DIRTY_CONTENT);
+      } else if (dot_menu_sel == 1) {
+        /* Rename */
+        rename_char = elements[dot_menu_row].label[0];
+        if (rename_char < 'A' || rename_char > 'Z') rename_char = 'A';
+        input_state = STATE_RENAME;
+        mark_dirty(DIRTY_OVERLAY);
+      } else if (dot_menu_sel == 2) {
+        /* Edit */
+        Element *e = &elements[dot_menu_row];
+        if (e->type == ELEM_POINT) {
+          ftoa(e->x, input_x_buf, 6);
+          ftoa(e->y, input_y_buf, 6);
+          input_field = 0;
+          input_state = STATE_EDIT_POINT;
+          mark_dirty(DIRTY_OVERLAY);
+        } else if (e->type == ELEM_VECTOR) {
+          ftoa(e->x,  vec_dx_buf, 6);
+          ftoa(e->y,  vec_dy_buf, 6);
+          vec_has_origin = e->has_origin;
+          if (e->has_origin) {
+            ftoa(e->ox, vec_ox_buf, 6);
+            ftoa(e->oy, vec_oy_buf, 6);
+          } else {
+            vec_ox_buf[0] = '\0';
+            vec_oy_buf[0] = '\0';
+          }
+          vec_field = 0;
+          input_state = STATE_EDIT_VECTOR;
+          mark_dirty(DIRTY_OVERLAY);
+        } else if (e->type == ELEM_LINE) {
+          if (e->si_form) {
+            ftoa(e->si_m, line_m_buf, 6);
+            ftoa(e->si_b, line_b_buf, 6);
+            line_si_field = 0;
+            line_substate = LINE_SUB_SLOPE_INTERCEPT;
+          } else {
+            ftoa(e->x,  line_a_buf,  6);
+            ftoa(e->y,  line_b2_buf, 6);
+            ftoa(e->ox, line_c_buf,  6);
+            line_cart_field = 0;
+            line_substate = LINE_SUB_CARTESIAN;
+          }
+          input_state = STATE_EDIT_LINE;
+          mark_dirty(DIRTY_OVERLAY);
+        }
       }
       break;
     default: break;
+  }
+}
+
+static void handle_rename(eadk_event_t ev) {
+  int j;
+  bool dup;
+  switch (ev) {
+    case eadk_event_up:
+      rename_char = (rename_char == 'A') ? 'Z' : (char)(rename_char - 1);
+      mark_dirty(DIRTY_OVERLAY);
+      break;
+    case eadk_event_down:
+      rename_char = (rename_char == 'Z') ? 'A' : (char)(rename_char + 1);
+      mark_dirty(DIRTY_OVERLAY);
+      break;
+    case eadk_event_ok:
+    case eadk_event_exe:
+      dup = false;
+      for (j = 0; j < elem_count; j++) {
+        if (j == dot_menu_row) continue;
+        if (elements[j].label[0] == rename_char) { dup = true; break; }
+      }
+      if (!dup) {
+        elements[dot_menu_row].label[0] = rename_char;
+        elements[dot_menu_row].label[1] = '\0';
+        input_state = STATE_LIST;
+        mark_dirty(DIRTY_CONTENT);
+      }
+      break;
+    case eadk_event_back:
+      input_state = STATE_LIST;
+      mark_dirty(DIRTY_CONTENT);
+      break;
+    default: break;
+  }
+}
+
+static void handle_edit_point(eadk_event_t ev) {
+  char *cur;
+  char c;
+  cur = (input_field == 0) ? input_x_buf : input_y_buf;
+  if (ev == eadk_event_back) {
+    if (strlen(cur) > 0)       { buf_backspace(cur); mark_dirty(DIRTY_OVERLAY); }
+    else if (input_field == 1) { input_field = 0; mark_dirty(DIRTY_OVERLAY); }
+    else                       { input_state = STATE_LIST; mark_dirty(DIRTY_CONTENT); }
+    return;
+  }
+  if (ev == eadk_event_down && input_field == 0) { input_field = 1; mark_dirty(DIRTY_OVERLAY); return; }
+  if (ev == eadk_event_up   && input_field == 1) { input_field = 0; mark_dirty(DIRTY_OVERLAY); return; }
+  if (ev == eadk_event_ok || ev == eadk_event_exe) {
+    if (input_field == 0) { input_field = 1; mark_dirty(DIRTY_OVERLAY); }
+    else                  { commit_edit_point(); }
+    return;
+  }
+  c = event_to_decimal(ev);
+  if (c) { buf_append(cur, c, 15); mark_dirty(DIRTY_OVERLAY); }
+}
+
+static void handle_edit_vector(eadk_event_t ev) {
+  char *cur;
+  char c;
+
+  cur = NULL;
+  if      (vec_field == 0) cur = vec_dx_buf;
+  else if (vec_field == 1) cur = vec_dy_buf;
+  else if (vec_has_origin && vec_field == 2) cur = vec_ox_buf;
+  else if (vec_has_origin && vec_field == 3) cur = vec_oy_buf;
+
+  if (ev == eadk_event_back) {
+    if (cur && strlen(cur) > 0) { buf_backspace(cur); mark_dirty(DIRTY_OVERLAY); return; }
+    if (!vec_has_origin) {
+      switch (vec_field) {
+        case 0: input_state = STATE_LIST; mark_dirty(DIRTY_CONTENT); break;
+        case 1: vec_field = 0; mark_dirty(DIRTY_OVERLAY); break;
+        case 2: vec_field = 1; mark_dirty(DIRTY_OVERLAY); break;
+        case 3: vec_field = 2; mark_dirty(DIRTY_OVERLAY); break;
+        default: break;
+      }
+    } else {
+      switch (vec_field) {
+        case 0: input_state = STATE_LIST; mark_dirty(DIRTY_CONTENT); break;
+        case 1: vec_field = 0; mark_dirty(DIRTY_OVERLAY); break;
+        case 2:
+          vec_ox_buf[0] = '\0'; vec_oy_buf[0] = '\0';
+          vec_has_origin = false; vec_field = 3; mark_dirty(DIRTY_OVERLAY); break;
+        case 3: vec_field = 2; mark_dirty(DIRTY_OVERLAY); break;
+        case 4: vec_field = 3; mark_dirty(DIRTY_OVERLAY); break;
+        default: break;
+      }
+    }
+    return;
+  }
+
+  if (ev == eadk_event_left || ev == eadk_event_right) {
+    if (!vec_has_origin) {
+      if      (vec_field == 2) { vec_field = 3; mark_dirty(DIRTY_OVERLAY); }
+      else if (vec_field == 3) { vec_field = 2; mark_dirty(DIRTY_OVERLAY); }
+    }
+    return;
+  }
+
+  if (ev == eadk_event_down) {
+    if (!vec_has_origin) {
+      if      (vec_field == 0) vec_field = 1;
+      else if (vec_field == 1) vec_field = 2;
+      else if (vec_field == 2) vec_field = 3;
+    } else {
+      if      (vec_field == 0) vec_field = 1;
+      else if (vec_field == 1) vec_field = 2;
+      else if (vec_field == 2) vec_field = 3;
+      else if (vec_field == 3) vec_field = 4;
+    }
+    mark_dirty(DIRTY_OVERLAY); return;
+  }
+
+  if (ev == eadk_event_up) {
+    if (!vec_has_origin) {
+      if      (vec_field == 3) vec_field = 2;
+      else if (vec_field == 2) vec_field = 1;
+      else if (vec_field == 1) vec_field = 0;
+    } else {
+      if      (vec_field == 4) vec_field = 3;
+      else if (vec_field == 3) vec_field = 2;
+      else if (vec_field == 2) vec_field = 1;
+      else if (vec_field == 1) vec_field = 0;
+    }
+    mark_dirty(DIRTY_OVERLAY); return;
+  }
+
+  if (ev == eadk_event_ok || ev == eadk_event_exe) {
+    if (!vec_has_origin) {
+      switch (vec_field) {
+        case 0: vec_field = 1; mark_dirty(DIRTY_OVERLAY); break;
+        case 1: vec_field = 2; mark_dirty(DIRTY_OVERLAY); break;
+        case 2: commit_edit_vector(); break;
+        case 3: vec_has_origin = true; vec_field = 2; mark_dirty(DIRTY_OVERLAY); break;
+        default: break;
+      }
+    } else {
+      switch (vec_field) {
+        case 0: vec_field = 1; mark_dirty(DIRTY_OVERLAY); break;
+        case 1: vec_field = 2; mark_dirty(DIRTY_OVERLAY); break;
+        case 2: vec_field = 3; mark_dirty(DIRTY_OVERLAY); break;
+        case 3: vec_field = 4; mark_dirty(DIRTY_OVERLAY); break;
+        case 4: commit_edit_vector(); break;
+        default: break;
+      }
+    }
+    return;
+  }
+
+  {
+    bool is_text = (vec_field == 0 || vec_field == 1 ||
+                    (vec_has_origin && (vec_field == 2 || vec_field == 3)));
+    if (is_text) {
+      c = event_to_decimal(ev);
+      if (c && cur) { buf_append(cur, c, 15); mark_dirty(DIRTY_OVERLAY); }
+    }
+  }
+}
+
+static void handle_edit_line(eadk_event_t ev) {
+  /* Reuse line SI/Cart handlers but commit to existing element */
+  char *cur;
+  char c;
+  if (line_substate == LINE_SUB_SLOPE_INTERCEPT) {
+    cur = (line_si_field == 0) ? line_m_buf : line_b_buf;
+    if (ev == eadk_event_back) {
+      if (strlen(cur) > 0)         { buf_backspace(cur); mark_dirty(DIRTY_OVERLAY); }
+      else if (line_si_field == 1) { line_si_field = 0; mark_dirty(DIRTY_OVERLAY); }
+      else                         { input_state = STATE_LIST; mark_dirty(DIRTY_CONTENT); }
+      return;
+    }
+    if (ev == eadk_event_down && line_si_field == 0) { line_si_field = 1; mark_dirty(DIRTY_OVERLAY); return; }
+    if (ev == eadk_event_up   && line_si_field == 1) { line_si_field = 0; mark_dirty(DIRTY_OVERLAY); return; }
+    if (ev == eadk_event_ok || ev == eadk_event_exe) {
+      if (line_si_field == 0) { line_si_field = 1; mark_dirty(DIRTY_OVERLAY); }
+      else                    { commit_edit_line_si(); }
+      return;
+    }
+    c = event_to_decimal(ev);
+    if (c) { buf_append(cur, c, 15); mark_dirty(DIRTY_OVERLAY); }
+  } else {
+    if      (line_cart_field == 0) cur = line_a_buf;
+    else if (line_cart_field == 1) cur = line_b2_buf;
+    else                           cur = line_c_buf;
+    if (ev == eadk_event_back) {
+      if (strlen(cur) > 0)          { buf_backspace(cur); mark_dirty(DIRTY_OVERLAY); }
+      else if (line_cart_field > 0) { line_cart_field--; mark_dirty(DIRTY_OVERLAY); }
+      else                          { input_state = STATE_LIST; mark_dirty(DIRTY_CONTENT); }
+      return;
+    }
+    if (ev == eadk_event_down && line_cart_field < 2) { line_cart_field++; mark_dirty(DIRTY_OVERLAY); return; }
+    if (ev == eadk_event_up   && line_cart_field > 0) { line_cart_field--; mark_dirty(DIRTY_OVERLAY); return; }
+    if (ev == eadk_event_ok || ev == eadk_event_exe) {
+      if (line_cart_field < 2) { line_cart_field++; mark_dirty(DIRTY_OVERLAY); }
+      else                     { commit_edit_line_cart(); }
+      return;
+    }
+    c = event_to_decimal(ev);
+    if (c) { buf_append(cur, c, 15); mark_dirty(DIRTY_OVERLAY); }
   }
 }
 
@@ -919,6 +1410,10 @@ void handle_input_event(eadk_event_t ev) {
     case STATE_ENTER_VECTOR: handle_vector_entry(ev);  break;
     case STATE_ENTER_LINE:   handle_line_entry(ev);    break;
     case STATE_DOT_MENU:     handle_dot_menu(ev);      break;
+    case STATE_RENAME:       handle_rename(ev);        break;
+    case STATE_EDIT_POINT:   handle_edit_point(ev);    break;
+    case STATE_EDIT_VECTOR:  handle_edit_vector(ev);   break;
+    case STATE_EDIT_LINE:    handle_edit_line(ev);     break;
   }
 }
 

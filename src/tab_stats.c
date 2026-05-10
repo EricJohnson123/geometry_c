@@ -2,9 +2,12 @@
 #include "ui.h"
 #include "elements.h"
 #include "tab_graph.h"
+#include "explain.h"
+#include "math_render.h"
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
 
 // ─── Math helpers ─────────────────────────────────────────────────────────────
 static float fsqrt(float s){
@@ -15,7 +18,8 @@ static float point_dist(float x1,float y1,float x2,float y2){
 }
 static float facos_deg(float x){
   float result,y,y3,y5,y7,asin_y,x3,x5,x7,asin_x;
-  if(x>1.0f)x=1.0f;if(x<-1.0f)x=-1.0f;
+  if(x>1.0f) x=1.0f;
+  if(x<-1.0f) x=-1.0f;
   if(x<-0.7f||x>0.7f){
     y=fsqrt((1.0f-x)/2.0f);y3=y*y*y;y5=y3*y*y;y7=y5*y*y;
     asin_y=y+y3/6.0f+3.0f*y5/40.0f+15.0f*y7/336.0f;result=2.0f*asin_y;
@@ -101,14 +105,33 @@ typedef struct{
   ElementType type;
   float x,y,ox;
   bool  si_form;float si_m,si_b;
-  int   subkey;        // distinguishes entries with identical (type,x,y,ox)
+  int   subkey;
   bool  added;int elem_idx;
   int   row_content_y;
+  int   abs_y;           /* scroll-independent y: stat_y + stat_scroll at draw time */
+  
+  // Explanation support
+  bool  has_explanation;
+  bool  is_explain_only;  // true = no + button, never commit to canvas
+  ExplanationType explain_type;
+  float src_x1, src_y1, src_x2, src_y2;
+  char  src_label1[4];
+  char  src_label2[4];
+  float src_x3, src_y3;
+  char  src_label3[4];
 } Addable;
 
 static Addable addables[MAX_ADDABLE];
 static int     addable_count=0;
-static int     stat_cursor=0;   // which addable slot the cursor is on
+static int     stat_cursor=-1;
+static int     stat_cursor_screen_y=-1;  // actual on-screen Y of cursor row
+
+// ─── Explanation State ────────────────────────────────────────────────────────
+static bool showing_explanation = false;
+static int  explain_scroll_y = 0;
+static int  explain_scroll_x = 0;
+static int  explain_target_idx = -1;
+static bool cursor_on_help = false;
 
 // Serial counters — only ever increment
 static int stat_point_serial=0;
@@ -129,7 +152,6 @@ static void persist_save(void){
     persist[i].added   =addables[i].added;persist[i].elem_idx=addables[i].elem_idx;
   }
 }
-// Look up persisted state at draw time, write into addables[slot] immediately
 static bool persist_lookup(int slot,int*elem_idx_out){
   int j;
   if(slot<0||slot>=MAX_ADDABLE){*elem_idx_out=-1;return false;}
@@ -153,19 +175,114 @@ static int stat_y,stat_scroll,stat_total_h;
 #define STAT_BASE_Y (CONTENT_Y+4)
 
 static void stat_line_plain(const char*label,const char*value){
+  int slot;
+  bool is_cur;
+  bool should_draw;
+  
   stat_total_h+=SMALL_FONT_H+2;
-  if(stat_y+SMALL_FONT_H<=CONTENT_Y){stat_y+=SMALL_FONT_H+2;return;}
-  if(stat_y>=CONTENT_BOTTOM){stat_y+=SMALL_FONT_H+2;return;}
+  should_draw = (stat_y+SMALL_FONT_H>CONTENT_Y && stat_y<CONTENT_BOTTOM);
+  
+  slot = addable_count;
+  if (slot < MAX_ADDABLE) {
+    addables[slot].type = ELEM_POINT;  // dummy, never committed
+    addables[slot].x = 0;
+    addables[slot].y = 0;
+    addables[slot].added = false;
+    addables[slot].elem_idx = -1;
+    addables[slot].has_explanation = false;
+    addables[slot].is_explain_only = true;  // can't add, no +
+    addables[slot].abs_y = stat_y + stat_scroll;
+    addable_count++;
+  }
+  
+  /* Track cursor position regardless of visibility */
+  if(slot == stat_cursor) stat_cursor_screen_y = stat_y;
+
+  if(!should_draw) {
+    stat_y+=SMALL_FONT_H+2;
+    return;
+  }
+  
+  is_cur = (slot == stat_cursor);
+  
+  if(is_cur) draw_str_clipped(">",2,stat_y,false,COLOR_ORANGE,COLOR_WHITE);
   draw_str_clipped(label,14,stat_y,false,COLOR_DARK_GRAY,COLOR_WHITE);
   draw_str_clipped(value,130,stat_y,false,COLOR_BLACK,COLOR_WHITE);
+  
   stat_y+=SMALL_FONT_H+2;
 }
 
-// subkey distinguishes rows with identical (type,x,y,ox) — e.g. SI vs Cart
-static void stat_line_add(const char*label,const char*value,
-                          ElementType type,float x,float y,float ox,
-                          bool si_form,float si_m,float si_b,int subkey){
-  int slot,dummy;bool is_cur,added;eadk_color_t btn_bg,btn_fg;int btn_y;
+static void stat_line_explain(const char*label, const char*value,
+                              bool has_expl, ExplanationType expl_type,
+                              float sx1, float sy1, float sx2, float sy2,
+                              const char*lbl1, const char*lbl2) {
+  int slot;
+  bool is_cur;
+  bool should_draw;
+  
+  stat_total_h += SMALL_FONT_H + 2;
+  should_draw = (stat_y + SMALL_FONT_H > CONTENT_Y && stat_y < CONTENT_BOTTOM);
+  
+  slot = addable_count;
+  if (slot < MAX_ADDABLE) {
+    addables[slot].type = ELEM_POINT;
+    addables[slot].x = 0;
+    addables[slot].y = 0;
+    addables[slot].added = false;
+    addables[slot].elem_idx = -1;
+    addables[slot].has_explanation = has_expl;
+    addables[slot].is_explain_only = true;
+    addables[slot].explain_type = expl_type;
+    addables[slot].src_x1 = sx1;
+    addables[slot].src_y1 = sy1;
+    addables[slot].src_x2 = sx2;
+    addables[slot].src_y2 = sy2;
+    strncpy(addables[slot].src_label1, lbl1 ? lbl1 : "A", 3);
+    addables[slot].src_label1[3] = '\0';
+    strncpy(addables[slot].src_label2, lbl2 ? lbl2 : "B", 3);
+    addables[slot].src_label2[3] = '\0';
+    addables[slot].src_x3 = 0.0f;
+    addables[slot].src_y3 = 0.0f;
+    addables[slot].src_label3[0] = '\0';
+    addables[slot].abs_y = stat_y + stat_scroll;
+    addable_count++;
+  }
+
+  /* Track cursor position regardless of visibility */
+  if(slot == stat_cursor) stat_cursor_screen_y = stat_y;
+
+  if(!should_draw) {
+    stat_y += SMALL_FONT_H + 2;
+    return;
+  }
+  
+  is_cur = (slot == stat_cursor);
+  
+  if(is_cur) draw_str_clipped(">",2,stat_y,false,COLOR_ORANGE,COLOR_WHITE);
+  draw_str_clipped(label, 14, stat_y, false, COLOR_DARK_GRAY, COLOR_WHITE);
+  draw_str_clipped(value, 130, stat_y, false, COLOR_BLACK, COLOR_WHITE);
+  
+  // Draw ? on the right
+  if (has_expl) {
+    draw_str_clipped("?", 290, stat_y, false, COLOR_DARK_GRAY, COLOR_WHITE);
+  }
+  
+  stat_y += SMALL_FONT_H + 2;
+}
+
+static void stat_line_add(const char*label, const char*value,
+                          ElementType type, float x, float y, float ox,
+                          bool si_form, float si_m, float si_b, int subkey,
+                          bool has_expl, ExplanationType expl_type,
+                          float sx1, float sy1, float sx2, float sy2,
+                          const char*lbl1, const char*lbl2) {
+  int slot,dummy;
+  bool is_cur,added;
+  bool should_draw;
+  
+  stat_total_h+=SMALL_FONT_H+2;
+  should_draw = (stat_y+SMALL_FONT_H>CONTENT_Y && stat_y<CONTENT_BOTTOM);
+  
   slot=addable_count;
   if(slot<MAX_ADDABLE){
     addables[slot].type         =type;
@@ -174,30 +291,52 @@ static void stat_line_add(const char*label,const char*value,
     addables[slot].subkey       =subkey;
     addables[slot].row_content_y=stat_y-CONTENT_Y;
     addables[slot].added        =false;addables[slot].elem_idx=-1;
+    addables[slot].has_explanation = has_expl;
+    addables[slot].is_explain_only = false;
+    addables[slot].explain_type = expl_type;
+    addables[slot].src_x1 = sx1;
+    addables[slot].src_y1 = sy1;
+    addables[slot].src_x2 = sx2;
+    addables[slot].src_y2 = sy2;
+    strncpy(addables[slot].src_label1, lbl1 ? lbl1 : "A", 3);
+    addables[slot].src_label1[3] = '\0';
+    strncpy(addables[slot].src_label2, lbl2 ? lbl2 : "B", 3);
+    addables[slot].src_label2[3] = '\0';
+    addables[slot].src_x3 = 0.0f;
+    addables[slot].src_y3 = 0.0f;
+    addables[slot].src_label3[0] = '\0';
+    addables[slot].abs_y = stat_y + stat_scroll;
     addable_count++;
     added=persist_lookup(slot,&dummy);
+    addables[slot].added = added;
+    addables[slot].elem_idx = (added ? dummy : -1);
   }else{added=false;}
 
-  stat_total_h+=SMALL_FONT_H+2;
-  if(stat_y+SMALL_FONT_H<=CONTENT_Y){stat_y+=SMALL_FONT_H+2;return;}
-  if(stat_y>=CONTENT_BOTTOM){stat_y+=SMALL_FONT_H+2;return;}
+  /* Track cursor position regardless of visibility */
+  if(slot == stat_cursor && slot < MAX_ADDABLE) stat_cursor_screen_y = stat_y;
+
+  if(!should_draw) {
+    stat_y+=SMALL_FONT_H+2;
+    return;
+  }
 
   is_cur=(slot==stat_cursor&&slot<MAX_ADDABLE);
+  
   if(is_cur)draw_str_clipped(">",2,stat_y,false,COLOR_ORANGE,COLOR_WHITE);
   draw_str_clipped(label,14,stat_y,false,COLOR_DARK_GRAY,COLOR_WHITE);
   draw_str_clipped(value,130,stat_y,false,COLOR_BLACK,COLOR_WHITE);
 
-  if(slot<MAX_ADDABLE){
-    btn_y=stat_y+(SMALL_FONT_H-BTN_SZ)/2;
-    if(added){btn_bg=COLOR_LIGHT_GRAY;btn_fg=COLOR_DARK_GRAY;}
-    else if(is_cur){btn_bg=COLOR_ORANGE;btn_fg=COLOR_WHITE;}
-    else{btn_bg=COLOR_DARK_GRAY;btn_fg=COLOR_WHITE;}
-    fill_rect_clipped(BTN_X,btn_y,BTN_SZ,BTN_SZ,btn_bg);
-    draw_rect_border(BTN_X,btn_y,BTN_SZ,BTN_SZ,COLOR_DARK_GRAY);
-    {int cx=BTN_X+BTN_SZ/2,cy=btn_y+BTN_SZ/2,hw=4;
-     fill_rect_clipped(cx-hw,cy,hw*2+1,1,btn_fg);
-     if(!added)fill_rect_clipped(cx,cy-hw,1,hw*2+1,btn_fg);}
+  // Draw symbols on right: +/- and ?
+  int sym_x = 280;
+  if(added){
+    draw_str_clipped("-",sym_x,stat_y,false,COLOR_DARK_GRAY,COLOR_WHITE);
+  }else{
+    draw_str_clipped("+",sym_x,stat_y,false,COLOR_DARK_GRAY,COLOR_WHITE);
   }
+  if(has_expl){
+    draw_str_clipped("?",sym_x+10,stat_y,false,COLOR_DARK_GRAY,COLOR_WHITE);
+  }
+  
   stat_y+=SMALL_FONT_H+2;
 }
 
@@ -217,6 +356,60 @@ static void stat_header(const char*text){
   }
   stat_y+=SMALL_FONT_H+3;
 }
+/* Set third source point for centroid explanation — call after stat_line_add */
+static void set_explain_extra(float x3, float y3, const char* lbl3) {
+  int last;
+  if (addable_count <= 0) return;
+  last = addable_count - 1;
+  addables[last].src_x3 = x3;
+  addables[last].src_y3 = y3;
+  strncpy(addables[last].src_label3, lbl3 ? lbl3 : "", 3);
+  addables[last].src_label3[3] = '\0';
+}
+
+/* Dispatch to the right generator and return step count */
+static int generate_explanation_steps(Addable* a, ExplainStep* steps) {
+  switch (a->explain_type) {
+    case EXPLAIN_DISTANCE:
+      return generate_distance_explanation(a->src_x1, a->src_y1, a->src_x2, a->src_y2,
+                                           a->src_label1, a->src_label2, steps);
+    case EXPLAIN_MIDPOINT:
+      return generate_midpoint_explanation(a->src_x1, a->src_y1, a->src_x2, a->src_y2,
+                                           a->src_label1, a->src_label2, steps);
+    case EXPLAIN_SLOPE:
+      return generate_slope_explanation(a->src_x1, a->src_y1, a->src_x2, a->src_y2,
+                                        a->src_label1, a->src_label2, steps);
+    case EXPLAIN_LINE_SI:
+      return generate_line_si_explanation(a->src_x1, a->src_y1, a->src_x2, a->src_y2,
+                                          a->src_label1, a->src_label2, steps);
+    case EXPLAIN_LINE_CART:
+      return generate_line_cart_explanation(a->src_x1, a->src_y1, a->src_x2, a->src_y2,
+                                            a->src_label1, a->src_label2, steps);
+    case EXPLAIN_VECTOR_MAG:
+      return generate_vector_mag_explanation(a->src_x1, a->src_y1,
+                                             a->src_label1, a->src_label2, steps);
+    case EXPLAIN_CENTROID:
+      return generate_centroid_explanation(a->src_x1, a->src_y1, a->src_x2, a->src_y2,
+                                           a->src_x3, a->src_y3,
+                                           a->src_label1, a->src_label2, a->src_label3,
+                                           steps);
+    default: return 0;
+  }
+}
+
+static const char* explain_title(ExplanationType t) {
+  switch (t) {
+    case EXPLAIN_DISTANCE:   return "Distance formula";
+    case EXPLAIN_MIDPOINT:   return "Midpoint formula";
+    case EXPLAIN_SLOPE:      return "Slope formula";
+    case EXPLAIN_LINE_SI:    return "Line equation";
+    case EXPLAIN_LINE_CART:  return "Cartesian form";
+    case EXPLAIN_VECTOR_MAG: return "Vector magnitude";
+    case EXPLAIN_CENTROID:   return "Centroid formula";
+    default:                 return "Explanation";
+  }
+}
+
 static void draw_scrollbar(void){
   int track_h,thumb_h,thumb_y,tx;
   if(stat_total_h<=CONTENT_H)return;
@@ -227,30 +420,119 @@ static void draw_scrollbar(void){
   fill_rect(tx,thumb_y,3,thumb_h,COLOR_DARK_GRAY);
 }
 
+// ─── Draw Explanation Overlay ─────────────────────────────────────────────────
+static void draw_explanation_overlay(void) {
+  ExplainStep steps[MAX_EXPLAIN_STEPS];
+  int num_steps = 0;
+  int i, y_line, total_height, step_h, cursor_y;
+  Addable* a;
+  const char* title;
+
+  /* Layout constants for the overlay */
+#define OVL_HEADER_H  18
+#define OVL_FOOTER_H  16
+#define OVL_CONTENT_Y OVL_HEADER_H
+#define OVL_CONTENT_BOTTOM (SCREEN_H - OVL_FOOTER_H)
+#define OVL_FIRST_STEP_Y   (OVL_CONTENT_Y + 4)
+
+  if (explain_target_idx < 0 || explain_target_idx >= addable_count) return;
+  a = &addables[explain_target_idx];
+  if (a->explain_type == EXPLAIN_NONE) return;
+
+  num_steps = generate_explanation_steps(a, steps);
+  if (num_steps == 0) return;
+
+  title = explain_title(a->explain_type);
+  total_height = math_steps_total_height(steps, num_steps);
+
+  /* Clear full screen */
+  fill_rect(0, 0, SCREEN_W, SCREEN_H, COLOR_WHITE);
+
+  /* Draw steps — variable height per step */
+  cursor_y = OVL_FIRST_STEP_Y - explain_scroll_y;
+  for (i = 0; i < num_steps; i++) {
+    const char* next_text = (i + 1 < num_steps) ? steps[i + 1].text : NULL;
+    step_h = math_expr_height(steps[i].text);
+    y_line = cursor_y;
+    /* Skip steps fully above the visible area */
+    if (y_line + step_h >= OVL_CONTENT_Y &&
+        y_line         <  OVL_CONTENT_BOTTOM) {
+      draw_math_expr(steps[i].text, 8, y_line, COLOR_BLACK, COLOR_WHITE);
+    }
+    cursor_y += step_h + math_step_gap(steps[i].text, next_text);
+    if (cursor_y >= OVL_CONTENT_BOTTOM) break;
+  }
+
+  /* Header drawn over steps */
+  fill_rect(0, 0, SCREEN_W, OVL_HEADER_H, COLOR_ORANGE);
+  draw_str(title, 6, 2, false, COLOR_WHITE, COLOR_ORANGE);
+  draw_str("Back", SCREEN_W - 32, 2, false, COLOR_WHITE, COLOR_ORANGE);
+
+  /* Footer drawn over steps */
+  fill_rect(0, SCREEN_H - OVL_FOOTER_H, SCREEN_W, OVL_FOOTER_H, COLOR_LIGHT_GRAY);
+  draw_str("Back: close", 6, SCREEN_H - OVL_FOOTER_H + 2, false,
+           COLOR_DARK_GRAY, COLOR_LIGHT_GRAY);
+
+  /* Scrollbar */
+  {
+    int visible_h = OVL_CONTENT_BOTTOM - OVL_CONTENT_Y;
+    if (total_height > visible_h) {
+      int track_h = visible_h;
+      int thumb_h = track_h * visible_h / total_height;
+      int thumb_y;
+      if (thumb_h < 8) thumb_h = 8;
+      thumb_y = OVL_CONTENT_Y +
+                (track_h - thumb_h) * explain_scroll_y /
+                (total_height - visible_h);
+      fill_rect(SCREEN_W - 4, OVL_CONTENT_Y, 3, track_h, COLOR_LIGHT_GRAY);
+      fill_rect(SCREEN_W - 4, thumb_y,        3, thumb_h, COLOR_DARK_GRAY);
+    }
+  }
+
+#undef OVL_HEADER_H
+#undef OVL_FOOTER_H
+#undef OVL_CONTENT_Y
+#undef OVL_CONTENT_BOTTOM
+#undef OVL_FIRST_STEP_Y
+}
+
 // ─── Commit / remove ──────────────────────────────────────────────────────────
 static void safe_point_label(char*out){
   int i;char tmp[4];
-  while(1){make_point_label(stat_point_serial%26,tmp);stat_point_serial++;
+  while(1){
+    memset(tmp, 0, sizeof(tmp));
+    make_point_label(stat_point_serial%26,tmp);stat_point_serial++;
     bool col=false;for(i=0;i<elem_count;i++){if(strcmp(elements[i].label,tmp)==0){col=true;break;}}
-    if(!col){out[0]=tmp[0];out[1]=tmp[1];out[2]=tmp[2];out[3]=tmp[3];return;}}
+    if(!col){out[0]=tmp[0];out[1]=tmp[1];out[2]=tmp[2];out[3]=tmp[3];return;}
+  }
 }
 static void safe_vec_label(char*out){
   int i;char tmp[4];
-  while(1){make_vector_label(stat_vec_serial%26,tmp);stat_vec_serial++;
+  while(1){
+    memset(tmp, 0, sizeof(tmp));
+    make_vector_label(stat_vec_serial%26,tmp);stat_vec_serial++;
     bool col=false;for(i=0;i<elem_count;i++){if(strcmp(elements[i].label,tmp)==0){col=true;break;}}
-    if(!col){out[0]=tmp[0];out[1]=tmp[1];out[2]=tmp[2];out[3]=tmp[3];return;}}
+    if(!col){out[0]=tmp[0];out[1]=tmp[1];out[2]=tmp[2];out[3]=tmp[3];return;}
+  }
 }
 static void safe_line_label(char*out){
   int i;char tmp[4];
-  while(1){make_line_label(stat_line_serial%26,tmp);stat_line_serial++;
+  while(1){
+    memset(tmp, 0, sizeof(tmp));
+    make_line_label(stat_line_serial%26,tmp);stat_line_serial++;
     bool col=false;for(i=0;i<elem_count;i++){if(strcmp(elements[i].label,tmp)==0){col=true;break;}}
-    if(!col){out[0]=tmp[0];out[1]=tmp[1];out[2]=tmp[2];out[3]=tmp[3];return;}}
+    if(!col){out[0]=tmp[0];out[1]=tmp[1];out[2]=tmp[2];out[3]=tmp[3];return;}
+  }
 }
 
 static void commit_addable(int idx){
   int k;Addable*add;Element*e;
   if(idx<0||idx>=addable_count)return;
   add=&addables[idx];
+  
+  // Skip if this is an explanation-only entry
+  if(add->is_explain_only) return;
+  
   if(add->added){
     int del=add->elem_idx;
     if(del<0||del>=elem_count){add->added=false;add->elem_idx=-1;persist_save();return;}
@@ -287,6 +569,14 @@ static void show_vector_stats(Element*v){
 
 // ─── Draw ─────────────────────────────────────────────────────────────────────
 void draw_stats_tab(void){
+  // If showing explanation, just draw the overlay and return
+  if (showing_explanation) {
+    draw_explanation_overlay();
+    return;
+  }
+  
+
+  
   int pi[MAX_ELEMENTS],pcount,vi[MAX_ELEMENTS],vcount,li[MAX_ELEMENTS],lcount;
   int acount,i,j;
   char buf[64],v1[16],v2[16],lbl[32],si_buf[48],cart_buf[48];
@@ -299,9 +589,12 @@ void draw_stats_tab(void){
 
   persist_save();
   addable_count=0;
-  for(i=0;i<MAX_ADDABLE;i++){addables[i].added=false;addables[i].elem_idx=-1;}
+  stat_cursor_screen_y=-1;
+  for(i=0;i<MAX_ADDABLE;i++){addables[i].added=false;addables[i].elem_idx=-1;addables[i].abs_y=0;}
 
-  fill_rect_clipped(0,CONTENT_Y,SCREEN_W,CONTENT_H,COLOR_WHITE);
+  // Clear entire content area first
+  fill_rect(0, CONTENT_Y, SCREEN_W, CONTENT_H, COLOR_WHITE);
+  
   stat_total_h=0;stat_y=STAT_BASE_Y-stat_scroll;
 
   pcount=0;vcount=0;lcount=0;
@@ -324,7 +617,6 @@ void draw_stats_tab(void){
   // ── 1 point ──────────────────────────────────────────────────────────────
   if(pcount==1&&vcount==0&&lcount==0){
     a=&SE(pi[0]);snprintf(buf,sizeof(buf),"Point %s",a->label);stat_header(buf);
-    fmtnum(a->x,v1);stat_line_plain("x",v1);fmtnum(a->y,v1);stat_line_plain("y",v1);
     stat_total_h+=STAT_BOTTOM_PAD;draw_scrollbar();return;
   }
 
@@ -333,19 +625,24 @@ void draw_stats_tab(void){
     a=&SE(pi[0]);b=&SE(pi[1]);
     snprintf(buf,sizeof(buf),"Points %s & %s",a->label,b->label);stat_header(buf);
     d=point_dist(a->x,a->y,b->x,b->y);fmtnum(d,v1);
-    snprintf(lbl,sizeof(lbl),"|%s%s|",a->label,b->label);stat_line_plain(lbl,v1);
+    snprintf(lbl,sizeof(lbl),"|%s%s|",a->label,b->label);
+    stat_line_explain(lbl, v1, true, EXPLAIN_DISTANCE, a->x, a->y, b->x, b->y, a->label, b->label);
     mx=(a->x+b->x)/2.0f;my=(a->y+b->y)/2.0f;
     fmtnum(mx,v1);fmtnum(my,v2);snprintf(buf,sizeof(buf),"(%s, %s)",v1,v2);
-    stat_line_add("Midpoint",buf,ELEM_POINT,mx,my,0,false,0,0, 0);
+    stat_line_add("Midpoint",buf,ELEM_POINT,mx,my,0,false,0,0, 0,
+                  true, EXPLAIN_MIDPOINT, a->x, a->y, b->x, b->y, a->label, b->label);
     stat_sep();
     snprintf(buf,sizeof(buf),"Line %s%s",a->label,b->label);stat_header(buf);
     if(b->x!=a->x){
       slope=(b->y-a->y)/(b->x-a->x);intercept=a->y-slope*a->x;
+      fmtnum(slope,v1);
+      stat_line_explain("Slope",v1, true, EXPLAIN_SLOPE, a->x,a->y,b->x,b->y, a->label,b->label);
       build_slope_intercept(slope,intercept,buf,sizeof(buf));
-      stat_line_add("SI form",buf, ELEM_LINE,slope,-1.0f,intercept,true,slope,intercept, 0);
+      stat_line_add("SI form",buf, ELEM_LINE,slope,-1.0f,intercept,true,slope,intercept, 0,
+                    true, EXPLAIN_LINE_SI, a->x, a->y, b->x, b->y, a->label, b->label);
       build_cartesian_from_abc(slope,-1.0f,intercept,buf,sizeof(buf));
-      stat_line_add("Cart.",buf,   ELEM_LINE,slope,-1.0f,intercept,false,0,0,            1);
-      fmtnum(slope,v1);stat_line_plain("Slope",v1);
+      stat_line_add("Cart.",buf,   ELEM_LINE,slope,-1.0f,intercept,false,0,0,            1,
+                    true, EXPLAIN_LINE_CART, a->x, a->y, b->x, b->y, a->label, b->label);
       fmtnum(intercept,v1);stat_line_plain("Y-intercept",v1);
       if(slope!=0.0f){fmtnum(-intercept/slope,v1);stat_line_plain("X-intercept",v1);}
     }else{
@@ -356,11 +653,15 @@ void draw_stats_tab(void){
     abx=b->x-a->x;aby=b->y-a->y;
     fmtnum(abx,v1);fmtnum(aby,v2);snprintf(buf,sizeof(buf),"(%s, %s)",v1,v2);
     snprintf(lbl,sizeof(lbl),"->%s%s",a->label,b->label);
-    stat_line_add(lbl,buf,ELEM_VECTOR,abx,aby,0,false,0,0, 0);
+    stat_line_add(lbl,buf,ELEM_VECTOR,abx,aby,0,false,0,0, 0,
+                  false, EXPLAIN_NONE, 0, 0, 0, 0, NULL, NULL);
     fmtnum(-abx,v1);fmtnum(-aby,v2);snprintf(buf,sizeof(buf),"(%s, %s)",v1,v2);
     snprintf(lbl,sizeof(lbl),"->%s%s",b->label,a->label);
-    stat_line_add(lbl,buf,ELEM_VECTOR,-abx,-aby,0,false,0,0, 1);
-    fmtnum(d,v1);stat_line_plain("Length",v1);
+    stat_line_add(lbl,buf,ELEM_VECTOR,-abx,-aby,0,false,0,0, 1,
+                  false, EXPLAIN_NONE, 0, 0, 0, 0, NULL, NULL);
+    fmtnum(d,v1);
+    stat_line_explain("Length",v1, true, EXPLAIN_VECTOR_MAG,
+                      abx, aby, 0, 0, a->label, b->label);
     stat_total_h+=STAT_BOTTOM_PAD;draw_scrollbar();return;
   }
 
@@ -404,7 +705,9 @@ void draw_stats_tab(void){
     if(!collinear){fmtnum(area,v1);stat_line_plain("Area",v1);}else stat_line_plain("Area","0 (collinear)");
     gx=(a->x+b->x+c->x)/3.0f;gy=(a->y+b->y+c->y)/3.0f;
     fmtnum(gx,v1);fmtnum(gy,v2);snprintf(buf,sizeof(buf),"(%s, %s)",v1,v2);
-    stat_line_add("Centroid G",buf,ELEM_POINT,gx,gy,0,false,0,0, 0);
+    stat_line_add("Centroid G",buf,ELEM_POINT,gx,gy,0,false,0,0, 0,
+                  true, EXPLAIN_CENTROID, a->x, a->y, b->x, b->y, a->label, b->label);
+    set_explain_extra(c->x, c->y, c->label);
     if(!collinear){
       {float a11=c->x-b->x,a12=c->y-b->y,r1=a11*a->x+a12*a->y;
        float a21=c->x-a->x,a22=c->y-a->y,r2=a21*b->x+a22*b->y;
@@ -412,7 +715,8 @@ void draw_stats_tab(void){
        if(det_h>0.0001f||det_h<-0.0001f){
          hx=(r1*a22-r2*a12)/det_h;hy=(a11*r2-a21*r1)/det_h;
          fmtnum(hx,v1);fmtnum(hy,v2);snprintf(buf,sizeof(buf),"(%s, %s)",v1,v2);
-         stat_line_add("Orthocenter H",buf,ELEM_POINT,hx,hy,0,false,0,0, 1);}}
+         stat_line_add("Orthocenter H",buf,ELEM_POINT,hx,hy,0,false,0,0, 1,
+                       false, EXPLAIN_NONE, 0, 0, 0, 0, NULL, NULL);}};
       {float mabx=(a->x+b->x)/2.0f,maby=(a->y+b->y)/2.0f;
        float mbcx=(b->x+c->x)/2.0f,mbcy=(b->y+c->y)/2.0f;
        float a11=b->x-a->x,a12=b->y-a->y,r1=a11*mabx+a12*maby;
@@ -422,7 +726,8 @@ void draw_stats_tab(void){
          ox3=(r1*a22-r2*a12)/det_c;oy3=(a11*r2-a21*r1)/det_c;
          cr=point_dist(ox3,oy3,a->x,a->y);
          fmtnum(ox3,v1);fmtnum(oy3,v2);snprintf(buf,sizeof(buf),"(%s, %s)",v1,v2);
-         stat_line_add("Circumcenter O",buf,ELEM_POINT,ox3,oy3,0,false,0,0, 2);
+         stat_line_add("Circumcenter O",buf,ELEM_POINT,ox3,oy3,0,false,0,0, 2,
+                       false, EXPLAIN_NONE, 0, 0, 0, 0, NULL, NULL);
          fmtnum(cr,v1);stat_line_plain("Circumradius R",v1);}}
     }
     stat_total_h+=STAT_BOTTOM_PAD;draw_scrollbar();return;
@@ -434,7 +739,8 @@ void draw_stats_tab(void){
     gx=0.0f;gy=0.0f;for(i=0;i<pcount;i++){gx+=SE(pi[i]).x;gy+=SE(pi[i]).y;}
     gx/=(float)pcount;gy/=(float)pcount;
     fmtnum(gx,v1);fmtnum(gy,v2);snprintf(buf,sizeof(buf),"(%s, %s)",v1,v2);
-    stat_line_add("Centroid G",buf,ELEM_POINT,gx,gy,0,false,0,0, 0);
+    stat_line_add("Centroid G",buf,ELEM_POINT,gx,gy,0,false,0,0, 0,
+                  false, EXPLAIN_NONE, 0, 0, 0, 0, NULL, NULL);
     stat_sep();draw_str_clipped("Select 2 or 3 pts for full stats.",10,stat_y,false,COLOR_DARK_GRAY,COLOR_WHITE);
     stat_total_h+=STAT_BOTTOM_PAD;draw_scrollbar();return;
   }
@@ -460,7 +766,8 @@ void draw_stats_tab(void){
       }
       sx=va->x+vb->x;sy=va->y+vb->y;
       fmtnum(sx,v1);fmtnum(sy,v2);snprintf(buf,sizeof(buf),"(%s, %s)",v1,v2);
-      stat_line_add("Sum u+v",buf,ELEM_VECTOR,sx,sy,0,false,0,0, 0);
+      stat_line_add("Sum u+v",buf,ELEM_VECTOR,sx,sy,0,false,0,0, 0,
+                    false, EXPLAIN_NONE, 0, 0, 0, 0, NULL, NULL);
       fmtnum(fsqrt(sx*sx+sy*sy),v1);stat_line_plain("|u+v|",v1);
     }else{
       float sx=0.0f,sy=0.0f;
@@ -474,7 +781,8 @@ void draw_stats_tab(void){
       }
       stat_sep();stat_header("Sum");
       fmtnum(sx,v1);fmtnum(sy,v2);snprintf(buf,sizeof(buf),"(%s, %s)",v1,v2);
-      stat_line_add("Sum",buf,ELEM_VECTOR,sx,sy,0,false,0,0, 0);
+      stat_line_add("Sum",buf,ELEM_VECTOR,sx,sy,0,false,0,0, 0,
+                    false, EXPLAIN_NONE, 0, 0, 0, 0, NULL, NULL);
       fmtnum(fsqrt(sx*sx+sy*sy),v1);stat_line_plain("|Sum|",v1);
     }
     stat_total_h+=STAT_BOTTOM_PAD;draw_scrollbar();return;
@@ -488,9 +796,11 @@ void draw_stats_tab(void){
     if(lb!=0.0f){
       float m=-la/lb,bint=-lc/lb;
       build_slope_intercept(m,bint,buf,sizeof(buf));
-      stat_line_add("SI form",buf,ELEM_LINE,la,lb,lc,true,m,bint, 0);
+      stat_line_add("SI form",buf,ELEM_LINE,la,lb,lc,true,m,bint, 0,
+                    false, EXPLAIN_NONE, 0, 0, 0, 0, NULL, NULL);
       build_cartesian_from_abc(la,lb,lc,buf,sizeof(buf));
-      stat_line_add("Cart.",buf,  ELEM_LINE,la,lb,lc,false,0,0,   1);
+      stat_line_add("Cart.",buf,  ELEM_LINE,la,lb,lc,false,0,0,   1,
+                    false, EXPLAIN_NONE, 0, 0, 0, 0, NULL, NULL);
       fmtnum(m,v1);stat_line_plain("Slope",v1);
       fmtnum(bint,v1);stat_line_plain("Y-intercept",v1);
       if(la!=0.0f){fmtnum(-lc/la,v1);stat_line_plain("X-intercept",v1);}
@@ -517,7 +827,8 @@ void draw_stats_tab(void){
       stat_line_plain("Parallel?","No");
       ix=(b1*c2-b2*c1)/det;iy2=(a2*c1-a1*c2)/det;
       fmtnum(ix,v1);fmtnum(iy2,v2);snprintf(buf,sizeof(buf),"(%s, %s)",v1,v2);
-      stat_line_add("Intersection",buf,ELEM_POINT,ix,iy2,0,false,0,0, 0);
+      stat_line_add("Intersection",buf,ELEM_POINT,ix,iy2,0,false,0,0, 0,
+                    false, EXPLAIN_NONE, 0, 0, 0, 0, NULL, NULL);
       len1=fsqrt(a1*a1+b1*b1);len2=fsqrt(a2*a2+b2*b2);
       if(len1>0.001f&&len2>0.001f){
         adot=((-b1)*(-b2)+a1*a2)/(len1*len2);angle=facos_deg(adot);if(angle>90.0f)angle=180.0f-angle;
@@ -545,7 +856,8 @@ void draw_stats_tab(void){
           fmtnum(dist,v1);snprintf(lbl,sizeof(lbl),"Dist %s",pt->label);stat_line_plain(lbl,v1);
           fmtnum(fx,v1);fmtnum(fy,v2);snprintf(buf,sizeof(buf),"(%s, %s)",v1,v2);
           snprintf(lbl,sizeof(lbl),"Foot %s",pt->label);
-          stat_line_add(lbl,buf,ELEM_POINT,fx,fy,0,false,0,0, sk++);
+          stat_line_add(lbl,buf,ELEM_POINT,fx,fy,0,false,0,0, sk++,
+                        false, EXPLAIN_NONE, 0, 0, 0, 0, NULL, NULL);
         }
       }
       if(pcount==2){
@@ -568,12 +880,15 @@ void draw_stats_tab(void){
         float tx=pt->x+vec->x,ty=pt->y+vec->y;
         snprintf(buf,sizeof(buf),"Pt %s + Vec ->%s",pt->label,vec->label);stat_header(buf);
         fmtnum(tx,v1);fmtnum(ty,v2);snprintf(buf,sizeof(buf),"(%s, %s)",v1,v2);
-        stat_line_add("Image point",buf,ELEM_POINT,tx,ty,0,false,0,0, sk++);
+        stat_line_add("Image point",buf,ELEM_POINT,tx,ty,0,false,0,0, sk++,
+                      false, EXPLAIN_NONE, 0, 0, 0, 0, NULL, NULL);
         build_line_through_point_dir(pt->x,pt->y,vec->x,vec->y,si_buf,sizeof(si_buf),cart_buf,sizeof(cart_buf));
         if(vec->x!=0.0f){
           float sl=vec->y/vec->x,ic=pt->y-sl*pt->x;
-          stat_line_add("SI form", si_buf, ELEM_LINE,sl,-1.0f,ic,true,sl,ic,  sk++);
-          stat_line_add("Cart.",   cart_buf,ELEM_LINE,sl,-1.0f,ic,false,0,0,  sk++);
+          stat_line_add("SI form", si_buf, ELEM_LINE,sl,-1.0f,ic,true,sl,ic,  sk++,
+                        false, EXPLAIN_NONE, 0, 0, 0, 0, NULL, NULL);
+          stat_line_add("Cart.",   cart_buf,ELEM_LINE,sl,-1.0f,ic,false,0,0,  sk++,
+                        false, EXPLAIN_NONE, 0, 0, 0, 0, NULL, NULL);
         }else stat_line_plain("Eq.",si_buf);
         if(i<vcount-1||j<pcount-1)stat_sep();
       }
@@ -603,7 +918,8 @@ void draw_stats_tab(void){
           float t_val=-(la*vec->ox+lb*vec->oy+lc)/dot_par;
           float ix=vec->ox+t_val*vec->x,iy=vec->oy+t_val*vec->y;
           fmtnum(ix,v1);fmtnum(iy,v2);snprintf(buf,sizeof(buf),"(%s, %s)",v1,v2);
-          stat_line_add("Intersection",buf,ELEM_POINT,ix,iy,0,false,0,0, sk++);
+          stat_line_add("Intersection",buf,ELEM_POINT,ix,iy,0,false,0,0, sk++,
+                        false, EXPLAIN_NONE, 0, 0, 0, 0, NULL, NULL);
           float vlen=fsqrt(vec->x*vec->x+vec->y*vec->y),llen=fsqrt(la*la+lb*lb);
           if(vlen>0.001f&&llen>0.001f){
             float dot_ang=vec->x*(-lb)+vec->y*la;
@@ -623,70 +939,179 @@ void draw_stats_tab(void){
   stat_line_plain("Vectors",vcount>0?"yes":"no");
   stat_line_plain("Lines",lcount>0?"yes":"no");
   stat_sep();draw_str_clipped("Complex combination.",10,stat_y,false,COLOR_DARK_GRAY,COLOR_WHITE);
-  stat_total_h+=STAT_BOTTOM_PAD;draw_scrollbar();
+  stat_total_h+=STAT_BOTTOM_PAD;
+  
+  /* Keep cursor in view (safety net for edge cases) */
+  if(stat_cursor >= 0 && stat_cursor < addable_count && stat_cursor_screen_y >= 0) {
+    int max_s = stat_total_h > CONTENT_H ? stat_total_h - CONTENT_H : 0;
+    if(stat_cursor_screen_y < CONTENT_Y) {
+      stat_scroll += stat_cursor_screen_y - CONTENT_Y;
+      if(stat_scroll < 0) stat_scroll = 0;
+      mark_dirty(DIRTY_CONTENT);
+    } else if(stat_cursor_screen_y + SMALL_FONT_H + 2 > CONTENT_BOTTOM) {
+      stat_scroll += (stat_cursor_screen_y + SMALL_FONT_H + 2) - CONTENT_BOTTOM;
+      if(stat_scroll > max_s) stat_scroll = max_s;
+      mark_dirty(DIRTY_CONTENT);
+    }
+  }
+  
+  draw_scrollbar();
   #undef SE
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
-void stats_reset_scroll(void){
-  int i;stat_scroll=0;stat_cursor=0;persist_count=0;
-  for(i=0;i<MAX_ADDABLE;i++){addables[i].added=false;addables[i].elem_idx=-1;}
-  refresh_snapshot();
-}
-
+// ─── Event handler ────────────────────────────────────────────────────────────
 void handle_stats_event(eadk_event_t ev){
   int max_scroll;
+  
+  // If showing explanation, handle separately
+  if (showing_explanation) {
+    switch(ev) {
+      case eadk_event_down: {
+        ExplainStep steps[MAX_EXPLAIN_STEPS];
+        int num_steps = 0;
+        int total_h, visible_h, max_scroll;
+        if (explain_target_idx >= 0 && explain_target_idx < addable_count)
+          num_steps = generate_explanation_steps(&addables[explain_target_idx], steps);
+        total_h   = math_steps_total_height(steps, num_steps);
+        visible_h = SCREEN_H - 18 - 16;   /* header + footer */
+        max_scroll = total_h - visible_h;
+        if (max_scroll > 0 && explain_scroll_y < max_scroll) {
+          explain_scroll_y += 16;
+          if (explain_scroll_y > max_scroll) explain_scroll_y = max_scroll;
+          mark_dirty(DIRTY_CONTENT);
+        }
+        break;
+      }
+      case eadk_event_up:
+        if (explain_scroll_y > 0) {
+          explain_scroll_y -= 16;
+          if (explain_scroll_y < 0) explain_scroll_y = 0;
+          mark_dirty(DIRTY_CONTENT);
+        }
+        break;
+      case eadk_event_right:
+      case eadk_event_left:
+        /* no horizontal scroll needed — text is left-aligned and clipped */
+        break;
+      case eadk_event_back:
+        showing_explanation = false;
+        explain_scroll_y = 0;
+        explain_scroll_x = 0;
+        mark_dirty(DIRTY_HEADER | DIRTY_CONTENT | DIRTY_TABS);
+        break;
+      default:
+        break;
+    }
+    return;
+  }
+  
+
+    // Normal stats navigation (not in explanation mode)
   switch(ev){
-    // Up/Down = scroll only, independent of cursor
     case eadk_event_down:
-      max_scroll=stat_total_h-CONTENT_H;
-      if(max_scroll>0&&stat_scroll<max_scroll){
-        stat_scroll+=16;if(stat_scroll>max_scroll)stat_scroll=max_scroll;
+      if(stat_cursor < addable_count - 1) {
+        int max_s;
+        stat_cursor++;
+        /* Proactively scroll to keep cursor visible using abs_y from last draw */
+        if(stat_cursor < addable_count) {
+          int ay = addables[stat_cursor].abs_y;
+          max_s = stat_total_h > CONTENT_H ? stat_total_h - CONTENT_H : 0;
+          if(ay - stat_scroll + SMALL_FONT_H + 2 > CONTENT_BOTTOM) {
+            stat_scroll = ay + SMALL_FONT_H + 2 - CONTENT_BOTTOM;
+            if(stat_scroll > max_s) stat_scroll = max_s;
+          }
+        }
         mark_dirty(DIRTY_CONTENT);
       }
       break;
     case eadk_event_up:
-      if(stat_scroll>0){
-        stat_scroll-=16;if(stat_scroll<0)stat_scroll=0;
+      if(stat_cursor > 0) {
+        stat_cursor--;
+        /* Proactively scroll to keep cursor visible using abs_y from last draw */
+        if(stat_cursor >= 0) {
+          int ay = addables[stat_cursor].abs_y;
+          if(ay - stat_scroll < CONTENT_Y) {
+            stat_scroll = ay - CONTENT_Y;
+            if(stat_scroll < 0) stat_scroll = 0;
+          }
+        }
         mark_dirty(DIRTY_CONTENT);
       }
       break;
 
-    // Left/Right = move cursor between addable buttons
     case eadk_event_left:
-      if(stat_cursor>0){
-        stat_cursor--;mark_dirty(DIRTY_CONTENT);
-      }else{
-        // Already on first button — go back to graph
-        stat_scroll=0;stat_cursor=0;
-        current_tab=TAB_GRAPH;
-        mark_dirty(DIRTY_TABS|DIRTY_CONTENT|DIRTY_TOOLBAR);
-      }
+      // Do nothing
       break;
+      
     case eadk_event_right:
-      if(addable_count>0&&stat_cursor<addable_count-1){
-        stat_cursor++;mark_dirty(DIRTY_CONTENT);
+      // First Right press: start at first stat
+      if(stat_cursor == -1) {
+        stat_cursor = 0;
+        mark_dirty(DIRTY_CONTENT);
       }
+      // Otherwise do nothing
       break;
 
-    // OK/EXE = press selected button
     case eadk_event_ok:
     case eadk_event_exe:
-      commit_addable(stat_cursor);mark_dirty(DIRTY_CONTENT);break;
+      if (addable_count > 0 && stat_cursor >= 0 && stat_cursor < addable_count) {
+        // If stat has explanation, show it
+        if (addables[stat_cursor].has_explanation) {
+          explain_target_idx = stat_cursor;
+          explain_scroll_y = 0;
+          explain_scroll_x = 0;
+          showing_explanation = true;
+          mark_dirty(DIRTY_CONTENT);
+        }
+      }
+      break;
 
-    // Ans = refresh snapshot
     case eadk_event_ans:{
-      int i;refresh_snapshot();stat_scroll=0;stat_cursor=0;persist_count=0;
-      for(i=0;i<MAX_ADDABLE;i++){addables[i].added=false;addables[i].elem_idx=-1;}
+      int i;refresh_snapshot();stat_scroll=0;stat_cursor=-1;
+      cursor_on_help=false;persist_count=0;
+      for(i=0;i<MAX_ADDABLE;i++){addables[i].added=false;addables[i].elem_idx=-1;addables[i].abs_y=0;}
       mark_dirty(DIRTY_CONTENT);break;
     }
 
-    // Back = also go back (same as left on first button)
     case eadk_event_back:
-      stat_scroll=0;stat_cursor=0;
+      stat_scroll=0;stat_cursor=-1;cursor_on_help=false;
       current_tab=TAB_GRAPH;
       mark_dirty(DIRTY_TABS|DIRTY_CONTENT|DIRTY_TOOLBAR);break;
 
+    case eadk_event_plus:
+      // Add current stat
+      if(addable_count > 0 && stat_cursor >= 0 && stat_cursor < addable_count) {
+        if(!addables[stat_cursor].is_explain_only) {
+          commit_addable(stat_cursor);
+          mark_dirty(DIRTY_CONTENT);
+        }
+      }
+      break;
+
+    case eadk_event_minus:
+      if(addable_count > 0 && stat_cursor >= 0 && stat_cursor < addable_count) {
+        if(!addables[stat_cursor].is_explain_only && addables[stat_cursor].added) {
+          commit_addable(stat_cursor);  // commit_addable removes when added==true
+          mark_dirty(DIRTY_CONTENT);
+        }
+      }
+      break;
+
     default:break;
   }
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+void stats_reset_scroll(void){
+  int i;
+  stat_scroll=0;
+  stat_cursor=-1;
+  cursor_on_help=false;
+  showing_explanation=false;
+  explain_scroll_y=0;
+  explain_scroll_x=0;
+  persist_count=0;
+  for(i=0;i<MAX_ADDABLE;i++){addables[i].added=false;addables[i].elem_idx=-1;addables[i].abs_y=0;}
+  refresh_snapshot();
+  mark_dirty(DIRTY_HEADER | DIRTY_CONTENT | DIRTY_TABS);
 }

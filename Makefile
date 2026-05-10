@@ -16,6 +16,8 @@ src = $(addprefix src/,\
   tab_input.c \
   tab_graph.c \
   tab_stats.c \
+  explain.c \
+  math_render.c \
 )
 
 CFLAGS  = -std=c99
